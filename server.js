@@ -471,21 +471,12 @@ app.post(
        * Explicit channel: SMS.
        * This prevents the app from requesting Voice OTP.
        */
-      const smsResponse = await fetch(
-        "https://2factor.in/API/V1/OTP/SEND",
-        {
-          method: "POST",
-          headers: {
-            "X-API-Key": apiKey,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            to: "+91" + mobile,
-            channel: "SMS",
-            template: template,
-            var1: code
-          })
-        }
+      const smsUrl =
+  `https://2factor.in/API/V1/${apiKey}/SMS/+91${mobile}/${code}/${template}`;
+
+const smsResponse = await fetch(smsUrl, {
+  method: "GET"
+});
       );
 
       const rawText = await smsResponse.text();
