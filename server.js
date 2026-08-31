@@ -477,7 +477,6 @@ app.post(
 const smsResponse = await fetch(smsUrl, {
   method: "GET"
 });
-      );
 
       const rawText = await smsResponse.text();
 
