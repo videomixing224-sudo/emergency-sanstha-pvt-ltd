@@ -1527,6 +1527,10 @@ app.put(
 ----------------------------- */
 app.delete("/api/admin/customers/:id", auth, roles("admin"), (req, res) => {
   const userId = Number(req.params.id);
+  if (!Number.isInteger(userId) || userId <= 0) {
+    return res.status(400).json({ error: "Invalid customer ID" });
+  }
+
   const customer = db.prepare(`
     SELECT id, role, name
     FROM users
@@ -1538,40 +1542,52 @@ app.delete("/api/admin/customers/:id", auth, roles("admin"), (req, res) => {
     return res.status(404).json({ error: "Customer not found" });
   }
 
-  const activeLoan = db.prepare(`
-    SELECT id
+  const loans = db.prepare(`
+    SELECT id, loan_id, outstanding, status
     FROM loans
     WHERE customer_id=?
-      AND NOT (
-        outstanding <= 0
-        OR LOWER(status) IN ('cleared','closed')
-      )
-    LIMIT 1
-  `).get(userId);
+  `).all(userId);
+
+  const activeLoan = loans.find(l => {
+    const outstanding = Number(l.outstanding || 0);
+    const status = String(l.status || "").toLowerCase();
+    return outstanding > 0 && !["cleared", "closed"].includes(status);
+  });
 
   if (activeLoan) {
     return res.status(400).json({
-      error: "Customer cannot be deleted while any loan is outstanding"
+      error: "Customer cannot be deleted while a loan has outstanding amount. Clear the loan first."
     });
   }
 
-  const transaction = db.transaction(() => {
-    db.prepare("DELETE FROM closure_requests WHERE customer_id=?").run(userId);
-    db.prepare("DELETE FROM service_requests WHERE customer_id=?").run(userId);
-    db.prepare("DELETE FROM mandates WHERE customer_id=?").run(userId);
-    db.prepare("DELETE FROM documents WHERE customer_id=?").run(userId);
-    db.prepare("DELETE FROM investments WHERE customer_id=?").run(userId);
-    // Payment rows reference loans, so remove them before deleting cleared loans.
-    db.prepare("DELETE FROM loan_payments WHERE customer_id=?").run(userId);
-    db.prepare("DELETE FROM loans WHERE customer_id=?").run(userId);
-    db.prepare("DELETE FROM users WHERE id=?").run(userId);
-  });
+  try {
+    const transaction = db.transaction(() => {
+      // Delete all child records first because SQLite foreign keys are enabled.
+      db.prepare("DELETE FROM closure_requests WHERE customer_id=?").run(userId);
+      db.prepare("DELETE FROM service_requests WHERE customer_id=?").run(userId);
+      db.prepare("DELETE FROM mandates WHERE customer_id=?").run(userId);
+      db.prepare("DELETE FROM documents WHERE customer_id=?").run(userId);
+      db.prepare("DELETE FROM investments WHERE customer_id=?").run(userId);
+      db.prepare("DELETE FROM loan_payments WHERE customer_id=?").run(userId);
 
-  transaction();
+      // Also remove payments by loan_id in case older records have a mismatched customer_id.
+      for (const loan of loans) {
+        db.prepare("DELETE FROM loan_payments WHERE loan_id=?").run(loan.id);
+      }
 
-  return res.json({
-    message: "Customer and cleared loan records deleted successfully"
-  });
+      db.prepare("DELETE FROM loans WHERE customer_id=?").run(userId);
+      const deleted = db.prepare("DELETE FROM users WHERE id=? AND role IN ('customer','investor')").run(userId);
+      if (deleted.changes !== 1) throw new Error("Customer record could not be deleted");
+    });
+
+    transaction();
+    return res.json({ message: `Customer ${customer.name} deleted successfully` });
+  } catch (error) {
+    console.error("Customer delete error:", error);
+    return res.status(500).json({
+      error: "Customer delete failed: " + (error.message || "database error")
+    });
+  }
 });
 
 /* -----------------------------
