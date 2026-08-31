@@ -408,73 +408,116 @@ app.post(
 );
 
 /* -----------------------------
-   Request OTP
+   Request REAL SMS OTP via 2Factor
 ----------------------------- */
 
 app.post(
   "/api/auth/request-otp",
   otpLimiter,
-  (req, res) => {
+  async (req, res) => {
 
-    const mobile =
-      String(req.body.mobile || "")
-        .replace(/\D/g, "");
+    try {
 
-    if (
-      !/^[6-9]\d{9}$/.test(mobile)
-    ) {
+      const mobile =
+        String(req.body.mobile || "")
+          .replace(/\D/g, "");
 
-      return res.status(400).json({
-        error:
-          "Enter a valid 10-digit Indian mobile number"
+      if (!/^[6-9]\d{9}$/.test(mobile)) {
+        return res.status(400).json({
+          error:
+            "Enter a valid 10-digit Indian mobile number"
+        });
+      }
+
+      const code = String(
+        crypto.randomInt(100000, 1000000)
+      );
+
+      const hash = bcrypt.hashSync(code, 10);
+
+      db.prepare(
+        "DELETE FROM otp_codes WHERE mobile=?"
+      ).run(mobile);
+
+      db.prepare(`
+        INSERT INTO otp_codes
+        (mobile, code_hash, expires_at)
+        VALUES (?, ?, ?)
+      `).run(
+        mobile,
+        hash,
+        Date.now() + 5 * 60 * 1000
+      );
+
+      const apiKey =
+        process.env.TWOFATOR_API_KEY;
+
+      if (!apiKey) {
+        db.prepare(
+          "DELETE FROM otp_codes WHERE mobile=?"
+        ).run(mobile);
+
+        console.error(
+          "TWOFATOR_API_KEY is missing"
+        );
+
+        return res.status(500).json({
+          error: "SMS service is not configured"
+        });
+      }
+
+      const templateName =
+        process.env.OTP_TEMPLATE || "LOGIN_OTP";
+
+      const smsResponse = await fetch(
+        "https://2factor.in/API/V1/OTP/SEND",
+        {
+          method: "POST",
+          headers: {
+            "X-API-Key": apiKey,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            to: "+91" + mobile,
+            template_name: templateName,
+            var1: code
+          })
+        }
+      );
+
+      const smsData = await smsResponse.json();
+
+      console.log("2Factor OTP response:", {
+        status: smsData.status,
+        session_id: smsData.session_id || undefined
+      });
+
+      if (
+        !smsResponse.ok ||
+        String(smsData.status || "").toLowerCase() !== "sent"
+      ) {
+        db.prepare(
+          "DELETE FROM otp_codes WHERE mobile=?"
+        ).run(mobile);
+
+        return res.status(502).json({
+          error: "Unable to send OTP SMS"
+        });
+      }
+
+      // Never return the OTP to the browser.
+      return res.json({
+        message: "OTP sent successfully to your mobile number"
+      });
+
+    } catch (error) {
+
+      console.error("OTP SMS error:", error);
+
+      return res.status(500).json({
+        error: "Failed to send OTP"
       });
     }
-
-    const code = String(
-      crypto.randomInt(
-        100000,
-        1000000
-      )
-    );
-
-    const hash =
-      bcrypt.hashSync(code, 10);
-
-    db.prepare(
-      "DELETE FROM otp_codes WHERE mobile=?"
-    ).run(mobile);
-
-    db.prepare(`
-      INSERT INTO otp_codes
-      (
-        mobile,
-        code_hash,
-        expires_at
-      )
-      VALUES (?, ?, ?)
-    `).run(
-      mobile,
-      hash,
-      Date.now() + 5 * 60 * 1000
-    );
-
-    const payload = {
-      message:
-        "OTP generated. Check your SMS in production."
-    };
-
-    /*
-     * Demo mode only.
-     */
-    if (
-      (process.env.OTP_MODE || "demo")
-        .toLowerCase() === "demo"
-    ) {
-
-      payload.demo_otp = code;
-    }
-
-    return res.json(payload);
   }
 );
 
