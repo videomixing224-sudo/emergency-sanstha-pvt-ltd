@@ -409,6 +409,8 @@ app.post(
 
 /* -----------------------------
    Request REAL SMS OTP via 2Factor
+   Uses 2Factor's legacy/manual OTP API,
+   which matches the API format for this account.
 ----------------------------- */
 
 app.post(
@@ -466,48 +468,56 @@ app.post(
         });
       }
 
-      const templateName =
-        process.env.OTP_TEMPLATE || "LOGIN_OTP";
+      // 2Factor manual OTP API expects the
+      // country code without the '+' sign.
+      const phone = "91" + mobile;
 
-      const smsResponse = await fetch(
-        "https://2factor.in/API/V1/OTP/SEND",
-        {
-          method: "POST",
-          headers: {
-            "X-API-Key": apiKey,
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            to: "+91" + mobile,
-            template_name: templateName,
-            var1: code
-          })
-        }
-      );
+      const apiUrl =
+        "https://2factor.in/API/V1/" +
+        encodeURIComponent(apiKey) +
+        "/SMS/" +
+        encodeURIComponent(phone) +
+        "/" +
+        encodeURIComponent(code);
 
-      const smsData = await smsResponse.json();
+      const smsResponse = await fetch(apiUrl, {
+        method: "GET"
+      });
+
+      const rawText = await smsResponse.text();
+
+      let smsData = null;
+      try {
+        smsData = JSON.parse(rawText);
+      } catch (_) {
+        // Some older 2Factor responses may not be JSON.
+      }
 
       console.log("2Factor OTP response:", {
-        status: smsData.status,
-        session_id: smsData.session_id || undefined
+        http_status: smsResponse.status,
+        provider_status: smsData?.Status || null,
+        provider_details: smsData?.Details || null,
+        raw_response: rawText
       });
 
       if (
         !smsResponse.ok ||
-        String(smsData.status || "").toLowerCase() !== "sent"
+        String(smsData?.Status || "").toLowerCase() !== "success"
       ) {
         db.prepare(
           "DELETE FROM otp_codes WHERE mobile=?"
         ).run(mobile);
 
         return res.status(502).json({
-          error: "Unable to send OTP SMS"
+          error:
+            "Unable to send OTP SMS. Please try again."
         });
       }
 
       // Never return the OTP to the browser.
       return res.json({
-        message: "OTP sent successfully to your mobile number"
+        message:
+          "OTP sent successfully to your mobile number"
       });
 
     } catch (error) {
