@@ -409,8 +409,7 @@ app.post(
 
 /* -----------------------------
    Request REAL SMS OTP via 2Factor
-   Uses 2Factor's legacy/manual OTP API,
-   which matches the API format for this account.
+   SMS channel is explicitly selected.
 ----------------------------- */
 
 app.post(
@@ -426,8 +425,7 @@ app.post(
 
       if (!/^[6-9]\d{9}$/.test(mobile)) {
         return res.status(400).json({
-          error:
-            "Enter a valid 10-digit Indian mobile number"
+          error: "Enter a valid 10-digit Indian mobile number"
         });
       }
 
@@ -451,89 +449,86 @@ app.post(
         Date.now() + 5 * 60 * 1000
       );
 
-      const apiKey =
-        process.env.TWOFATOR_API_KEY;
+      const apiKey = process.env.TWOFATOR_API_KEY;
 
       if (!apiKey) {
         db.prepare(
           "DELETE FROM otp_codes WHERE mobile=?"
         ).run(mobile);
 
-        console.error(
-          "TWOFATOR_API_KEY is missing"
-        );
+        console.error("TWOFATOR_API_KEY is missing");
 
         return res.status(500).json({
           error: "SMS service is not configured"
         });
       }
 
-      // 2Factor manual OTP API expects the
-      // country code without the '+' sign.
-      const phone = "91" + mobile;
+      const template =
+        process.env.OTP_TEMPLATE || "LOGIN_OTP";
 
-      const apiUrl =
-        "https://2factor.in/API/V1/" +
-        encodeURIComponent(apiKey) +
-        "/SMS/" +
-        encodeURIComponent(phone) +
-        "/" +
-        encodeURIComponent(code);
-
-      const smsResponse = await fetch(apiUrl, {
-        method: "GET"
-      });
+      /*
+       * 2Factor current OTP API.
+       * Explicit channel: SMS.
+       * This prevents the app from requesting Voice OTP.
+       */
+      const smsResponse = await fetch(
+        "https://2factor.in/API/V1/OTP/SEND",
+        {
+          method: "POST",
+          headers: {
+            "X-API-Key": apiKey,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            to: "+91" + mobile,
+            channel: "SMS",
+            template: template,
+            var1: code
+          })
+        }
+      );
 
       const rawText = await smsResponse.text();
 
       let smsData = null;
       try {
         smsData = JSON.parse(rawText);
-      } catch (_) {
-        // Some older 2Factor responses may not be JSON.
-      }
+      } catch (_) {}
 
-      console.log("2Factor OTP response:", {
+      console.log("2Factor SMS OTP response:", {
         http_status: smsResponse.status,
-        provider_status: smsData?.Status || null,
-        provider_details: smsData?.Details || null,
+        provider_status: smsData?.status || null,
+        session_id: smsData?.session_id || null,
         raw_response: rawText
       });
 
       if (
         !smsResponse.ok ||
-        String(smsData?.Status || "").toLowerCase() !== "success"
+        String(smsData?.status || "").toLowerCase() !== "sent"
       ) {
         db.prepare(
           "DELETE FROM otp_codes WHERE mobile=?"
         ).run(mobile);
 
         return res.status(502).json({
-          error:
-            "Unable to send OTP SMS. Please try again."
+          error: "Unable to send SMS OTP"
         });
       }
 
-      // Never return the OTP to the browser.
       return res.json({
-        message:
-          "OTP sent successfully to your mobile number"
+        message: "OTP sent successfully by SMS"
       });
 
     } catch (error) {
 
-      console.error("OTP SMS error:", error);
+      console.error("2Factor SMS OTP error:", error);
 
       return res.status(500).json({
-        error: "Failed to send OTP"
+        error: "Failed to send SMS OTP"
       });
     }
   }
 );
-
-/* -----------------------------
-   Verify OTP
------------------------------ */
 
 app.post(
   "/api/auth/verify-otp",
