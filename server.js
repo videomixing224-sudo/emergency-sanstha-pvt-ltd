@@ -449,114 +449,103 @@ app.post(
         Date.now() + 5 * 60 * 1000
       );
 
-      /*
-       * Railway variable name used by this project is TWOFATOR_API_KEY.
-       * TWOFACTOR_API_KEY is also accepted so a spelling difference in
-       * Railway does not silently break OTP.
-       */
+      // 2Factor account/API key
+      // Keep the existing Railway variable name for compatibility.
       const apiKey =
         process.env.TWOFATOR_API_KEY ||
-        process.env.TWOFACTOR_API_KEY ||
-        "";
+        process.env.TWOFACTOR_API_KEY;
 
-      if (!apiKey.trim()) {
+      if (!apiKey) {
         db.prepare(
           "DELETE FROM otp_codes WHERE mobile=?"
         ).run(mobile);
 
         console.error(
-          "2Factor API key is missing. Set TWOFATOR_API_KEY in Railway Variables."
+          "TWOFATOR_API_KEY / TWOFACTOR_API_KEY is missing"
         );
 
         return res.status(500).json({
-          error:
-            "SMS service is not configured. Add TWOFATOR_API_KEY in Railway Variables."
+          error: "SMS service is not configured"
         });
       }
 
-      /*
-       * 2Factor OTP API.
-       * Explicit channel: SMS.
-       * The current API expects template_name (not template).
-       */
-      const templateName =
+      const template =
         process.env.OTP_TEMPLATE_NAME ||
         process.env.OTP_TEMPLATE ||
         "LOGIN_OTP";
 
-      const smsResponse = await fetch(
-        "https://2factor.in/API/V1/OTP/SEND",
-        {
-          method: "POST",
-          headers: {
-            "X-API-Key": apiKey.trim(),
-            "Content-Type": "application/json"
-          },
-          body: JSON.stringify({
-            to: "+91" + mobile,
-            channel: "SMS",
-            template_name: templateName,
-            var1: code
-          })
+      /*
+       * 2Factor Custom OTP SMS API.
+       * The documented endpoint uses GET with the API key,
+       * mobile number, OTP value and OTP template in the path:
+       * /API/V1/{api_key}/SMS/{phone_number}/{otp_value}/{template}
+       *
+       * We deliberately use the SMS endpoint here, not Voice OTP.
+       */
+      const apiUrl =
+        "https://2factor.in/API/V1/" +
+        encodeURIComponent(apiKey) +
+        "/SMS/" +
+        encodeURIComponent("+91" + mobile) +
+        "/" +
+        encodeURIComponent(code) +
+        "/" +
+        encodeURIComponent(template);
+
+      const smsResponse = await fetch(apiUrl, {
+        method: "GET",
+        headers: {
+          "Accept": "application/json, text/plain, */*"
         }
-      );
+      });
 
       const rawText = await smsResponse.text();
 
       let smsData = null;
-
       try {
         smsData = JSON.parse(rawText);
       } catch (_) {
-        smsData = {
-          raw_response: rawText
-        };
+        // Some 2Factor responses may be plain text.
       }
 
-      const providerStatus =
-        String(
-          smsData?.status ??
-          smsData?.Status ??
-          ""
-        ).toLowerCase();
+      const providerStatus = String(
+        smsData?.Status ??
+        smsData?.status ??
+        smsData?.Details ??
+        smsData?.details ??
+        rawText
+      ).trim().toLowerCase();
 
-      const sessionId =
-        smsData?.session_id ??
-        smsData?.SessionId ??
-        null;
+      console.log("2Factor SMS OTP response:", {
+        http_status: smsResponse.status,
+        provider_status:
+          smsData?.Status ?? smsData?.status ?? null,
+        details:
+          smsData?.Details ?? smsData?.details ?? null,
+        raw_response: rawText
+      });
 
-      console.log(
-        "2Factor SMS OTP response:",
-        {
-          http_status: smsResponse.status,
-          provider_status: providerStatus,
-          session_id: sessionId,
-          raw_response: rawText
-        }
-      );
+      const sent =
+        smsResponse.ok &&
+        (
+          providerStatus === "success" ||
+          providerStatus === "sent" ||
+          providerStatus.includes("success") ||
+          providerStatus.includes("sent")
+        );
 
-      if (
-        !smsResponse.ok ||
-        !["sent", "success"].includes(providerStatus)
-      ) {
+      if (!sent) {
         db.prepare(
           "DELETE FROM otp_codes WHERE mobile=?"
         ).run(mobile);
 
         return res.status(502).json({
-          error:
-            "Unable to send SMS OTP",
-          provider_status: providerStatus || "unknown",
-          provider_response:
-            smsData?.Details ??
-            smsData?.details ??
-            rawText
+          error: "Unable to send SMS OTP"
         });
       }
 
       return res.json({
-        message: "OTP sent successfully by SMS",
-        session_id: sessionId
+        message: "OTP sent successfully by SMS"
       });
 
     } catch (error) {
