@@ -436,44 +436,32 @@ function ensureCustomerCredentials(userId) {
     throw new Error("Customer not found");
   }
 
-  const loginId =
-    user.login_id ||
-    customerLoginId(user.id);
-
+  const loginId = customerLoginId(user.id);
   let temporaryPassword = null;
 
-  if (!user.login_id) {
-    db.prepare(`
-      UPDATE users
-      SET login_id=?
-      WHERE id=?
-    `).run(
-      loginId,
-      user.id
-    );
-  }
+  // Always keep customer login_id equal to the mobile number.
+  db.prepare(`
+    UPDATE users
+    SET login_id=?
+    WHERE id=?
+  `).run(loginId, user.id);
 
   if (!user.password_hash) {
-    temporaryPassword =
-      generateCustomerPassword();
+    temporaryPassword = generateCustomerPassword();
 
     db.prepare(`
       UPDATE users
       SET password_hash=?, status='active'
       WHERE id=?
     `).run(
-      bcrypt.hashSync(
-        temporaryPassword,
-        12
-      ),
+      bcrypt.hashSync(temporaryPassword, 12),
       user.id
     );
   }
 
   return {
     login_id: loginId,
-    temporary_password:
-      temporaryPassword
+    temporary_password: temporaryPassword
   };
 }
 
@@ -1567,9 +1555,59 @@ app.post(
         ),
       message:
         credentials.temporary_password
-          ? "Loan created and customer login credentials generated"
-          : "Loan created; existing customer credentials kept"
+          ? `Loan created. Customer Login ID: ${credentials.login_id} | Password: ${credentials.temporary_password}`
+          : `Loan created. Customer Login ID: ${credentials.login_id}. Existing password kept.`
     });
+  }
+);
+
+
+/* -----------------------------
+   Admin: Reset Customer Login
+----------------------------- */
+
+app.post(
+  "/api/admin/customers/:id/reset-login",
+  auth,
+  roles("admin"),
+  (req, res) => {
+    try {
+      const userId = Number(req.params.id);
+      const user = db.prepare(`
+        SELECT id, mobile, role, status
+        FROM users
+        WHERE id=?
+          AND role IN ('customer','investor')
+        LIMIT 1
+      `).get(userId);
+
+      if (!user) {
+        return res.status(404).json({ error: "Customer not found" });
+      }
+
+      const loginId = customerLoginId(userId);
+      const password = generateCustomerPassword();
+
+      db.prepare(`
+        UPDATE users
+        SET login_id=?, password_hash=?, status='active'
+        WHERE id=?
+      `).run(
+        loginId,
+        bcrypt.hashSync(password, 12),
+        userId
+      );
+
+      return res.json({
+        customer_id: userId,
+        customer_user_id: loginId,
+        temporary_password: password,
+        message: `Customer login reset. Login ID: ${loginId} | Password: ${password}`
+      });
+    } catch (error) {
+      console.error("Customer login reset error:", error);
+      return res.status(500).json({ error: "Unable to reset customer login" });
+    }
   }
 );
 
