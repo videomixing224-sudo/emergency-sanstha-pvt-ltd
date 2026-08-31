@@ -27,3 +27,5 @@
 }
 
 .danger-btn{border-color:#dc3545!important;color:#b42318!important}
+
+.signature-canvas{max-width:100%;background:#fff;touch-action:none;}

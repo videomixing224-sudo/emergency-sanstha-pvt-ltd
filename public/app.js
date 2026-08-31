@@ -96,10 +96,23 @@ async function saveCustomer(e,id){e.preventDefault();try{const body={name:cn.val
 
 async function adminLoans(){
 const rows=await api("/api/admin/loans");document.getElementById("content").innerHTML=`<div class="title"><h1>Loan Management</h1><div class="row"><button class="btn" onclick="openLoanForm()">+ New Loan</button><button class="btn secondary" onclick="location.href='/api/admin/export/loans'">Export CSV</button></div></div>
-<div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Customer</th><th>Product</th><th>Principal</th><th>Outstanding</th><th>Paid</th><th>Interest</th><th>EMI</th><th>Duration</th><th>Payment</th><th>DPD</th><th>Status</th><th>Action</th></tr>${rows.map(r=>`<tr><td>${r.loan_id}</td><td>${esc(r.customer_name)}<br><small>${r.mobile}</small></td><td>${esc(r.product)}</td><td>${money(r.principal)}</td><td>${money(r.outstanding)}</td><td>${money(r.total_paid)}</td><td>${r.interest_rate}%</td><td>${money(r.emi)}</td><td>${r.duration_days||0} days</td><td>${r.payment_frequency||"monthly"}</td><td>${r.dpd}</td><td>${r.status}</td><td><button class="btn" onclick="openPaymentForm(${r.id})">Add Payment</button> <button class="btn secondary" onclick="markLoanClear(${r.id})">Clear</button> <button class="btn secondary" onclick="deleteLoan(${r.id},${JSON.stringify(r.status)})">Delete</button></td></tr>`).join("")}</table></div>`;
+<div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Customer</th><th>Product</th><th>Principal</th><th>Outstanding</th><th>Paid</th><th>Interest</th><th>EMI</th><th>Duration</th><th>Payment</th><th>DPD</th><th>Status</th><th>Action</th></tr>${rows.map(r=>`<tr><td>${r.loan_id}</td><td>${esc(r.customer_name)}<br><small>${r.mobile}</small></td><td>${esc(r.product)}</td><td>${money(r.principal)}</td><td>${money(r.outstanding)}</td><td>${money(r.total_paid)}</td><td>${r.interest_rate}%</td><td>${money(r.emi)}</td><td>${r.duration_days||0} days</td><td>${r.payment_frequency||"monthly"}</td><td>${r.dpd}</td><td>${r.status}</td><td><button class="btn" onclick="openPaymentForm(${r.id})">Add Payment</button> <button class="btn secondary" onclick="openAgreement(${r.id})">Agreement</button> <button class="btn secondary" onclick="markLoanClear(${r.id})">Clear</button> <button class="btn secondary" onclick="deleteLoan(${r.id},${JSON.stringify(r.status)})">Delete</button></td></tr>`).join("")}</table></div>`;
 }
 async function markLoanClear(id){try{await api(`/api/admin/loans/${id}/clear`,{method:"POST"});adminLoans()}catch(e){alert(e.message)}}
 async function deleteLoan(id,status){if(!["cleared","closed"].includes(String(status).toLowerCase())){alert("Pehle loan ko Clear karein. Sirf cleared/closed loan delete ho sakta hai.");return}if(!confirm("Kya aap is cleared loan ko permanently delete karna chahte hain?"))return;try{await api(`/api/admin/loans/${id}`,{method:"DELETE"});adminLoans()}catch(e){alert(e.message)}}
+async function openAgreement(id){
+  try{
+    const status=await api(`/api/admin/loans/${id}/agreement-status`);
+    showModal(`<h2>Loan Agreement</h2>
+      <div class="notice"><b>Loan ID:</b> ${esc(status.loan_id)}<br>
+      <b>Agreement:</b> Generated<br>
+      <b>Customer Signature:</b> ${status.signed ? "Signed on "+esc(status.signed_at||"") : "Not signed yet"}</div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" onclick="window.open('/api/admin/loans/${id}/agreement.pdf','_blank')">Open / Print PDF</button>
+        <button class="btn secondary" onclick="closeModal()">Close</button>
+      </div>`);
+  }catch(e){alert(e.message)}
+}
 async function openLoanForm(){
 const customers=await api("/api/admin/customers");showModal(`<h2>Create Loan</h2><form onsubmit="saveLoan(event)" class="form">
 <div class="field"><label>Customer</label><select id="lc">${customers.map(c=>`<option value="${c.id}">${esc(c.name)} - ${esc(c.mobile)}</option>`).join("")}</select></div>
@@ -184,15 +197,59 @@ async function custLoans(){
 const d=await api("/api/customer/dashboard");
 const payments=d.payments||[];
 document.getElementById("content").innerHTML=`<div class="title"><h1>My Loan & Payments</h1></div>
-<div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Product</th><th>Loan Amount</th><th>Total Jama</th><th>Outstanding</th><th>Interest</th><th>EMI</th><th>Duration</th><th>Payment</th><th>Status</th></tr>
+<div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Product</th><th>Loan Amount</th><th>Total Jama</th><th>Outstanding</th><th>Interest</th><th>EMI</th><th>Duration</th><th>Payment</th><th>Status</th><th>Agreement</th></tr>
 ${d.loans.map(r=>{
  const paid=payments.filter(p=>Number(p.loan_id)===Number(r.id)).reduce((sum,p)=>sum+Number(p.amount||0),0);
- return `<tr><td>${esc(r.loan_id)}</td><td>${esc(r.product)}</td><td>${money(r.principal)}</td><td>${money(paid)}</td><td>${money(r.outstanding)}</td><td>${r.interest_rate}%</td><td>${money(r.emi)}</td><td>${r.duration_days||0} days</td><td>${r.payment_frequency||"monthly"}</td><td>${r.status}</td></tr>`;
+ return `<tr><td>${esc(r.loan_id)}</td><td>${esc(r.product)}</td><td>${money(r.principal)}</td><td>${money(paid)}</td><td>${money(r.outstanding)}</td><td>${r.interest_rate}%</td><td>${money(r.emi)}</td><td>${r.duration_days||0} days</td><td>${r.payment_frequency||"monthly"}</td><td>${r.status}</td><td><button class="btn secondary" onclick="openCustomerAgreement(${r.id},${JSON.stringify(r.loan_id)})">Agreement</button></td></tr>`;
 }).join("")||"<tr><td colspan=10>No loan found</td></tr>"}</table></div>
 <div class="card" style="margin-top:16px"><h2>Payment History</h2>
 <div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Jama Amount</th><th>Date</th><th>Note</th></tr>
 ${payments.map(p=>`<tr><td><b>${esc(p.loan_code)}</b></td><td>${money(p.amount)}</td><td>${esc(p.payment_date)}</td><td>${esc(p.note||"")}</td></tr>`).join("")||"<tr><td colspan=4>No payment recorded</td></tr>"}
 </table></div></div>`;
+}
+async function openCustomerAgreement(id,loanCode){
+  try{
+    const d=await api("/api/customer/dashboard");
+    const loan=d.loans.find(x=>Number(x.id)===Number(id));
+    if(!loan){alert("Loan not found");return}
+    showModal(`<h2>Loan Agreement - ${esc(loanCode)}</h2>
+      <div class="notice">Please read the agreement PDF before signing. Your signature will be stored with this loan record.</div>
+      <div class="row" style="margin:12px 0">
+        <button class="btn" onclick="window.open('/api/customer/loans/${id}/agreement.pdf','_blank')">View Agreement PDF</button>
+      </div>
+      <h3>Customer Signature</h3>
+      <canvas id="sigCanvas" width="520" height="180" style="width:100%;max-width:520px;border:1px solid #bbb;border-radius:8px;background:#fff;touch-action:none"></canvas>
+      <div class="row" style="margin-top:10px">
+        <button type="button" class="btn secondary" onclick="clearSignature()">Clear Signature</button>
+        <button type="button" class="btn" onclick="submitSignature(${id})">Sign & Generate Signed PDF</button>
+      </div>
+      <p class="muted" style="margin-top:8px">Sign inside the box using mouse or touch.</p>`);
+    initSignatureCanvas();
+  }catch(e){alert(e.message)}
+}
+let signaturePadState=null;
+function initSignatureCanvas(){
+  const c=document.getElementById("sigCanvas"); if(!c)return;
+  const ctx=c.getContext("2d"); ctx.lineWidth=2; ctx.lineCap="round"; ctx.strokeStyle="#111";
+  let drawing=false,has=false;
+  const point=e=>{const r=c.getBoundingClientRect(); const p=e.touches?e.touches[0]:e; return {x:(p.clientX-r.left)*c.width/r.width,y:(p.clientY-r.top)*c.height/r.height}};
+  const start=e=>{e.preventDefault();drawing=true;has=true;const p=point(e);ctx.beginPath();ctx.moveTo(p.x,p.y)};
+  const move=e=>{if(!drawing)return;e.preventDefault();const p=point(e);ctx.lineTo(p.x,p.y);ctx.stroke()};
+  const stop=e=>{drawing=false};
+  c.onmousedown=start;c.onmousemove=move;c.onmouseup=stop;c.onmouseleave=stop;
+  c.ontouchstart=start;c.ontouchmove=move;c.ontouchend=stop;
+  signaturePadState={c,ctx,get has(){return has},clear:()=>{ctx.clearRect(0,0,c.width,c.height);has=false}};
+}
+function clearSignature(){signaturePadState?.clear()}
+async function submitSignature(id){
+  if(!signaturePadState?.has){alert("Please sign in the signature box first.");return}
+  try{
+    const signature_data=signaturePadState.c.toDataURL("image/png");
+    const result=await api(`/api/customer/loans/${id}/sign-agreement`,{method:"POST",body:{signature_data}});
+    alert(result.message);
+    window.open(`/api/customer/loans/${id}/agreement.pdf`,"_blank");
+    closeModal();
+  }catch(e){alert(e.message)}
 }
 function custInsurance(){document.getElementById("content").innerHTML=`<div class="card"><h1>Insurance</h1><div class="notice">Insurance is currently <b>Not Available</b>.</div></div>`}
 function custRequest(){document.getElementById("content").innerHTML=`<div class="card"><h1>Service Request</h1><p class="muted">Support: 06479451097</p><form onsubmit="sendRequest(event)" class="form"><div class="field"><label>Subject</label><input id="rs" required></div><div class="field"><label>Message</label><textarea id="rm" required></textarea></div><div class="field full"><button class="btn">Submit Request</button></div></form></div>`}

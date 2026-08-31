@@ -10,6 +10,7 @@ const Database = require("better-sqlite3");
 const path = require("path");
 const fs = require("fs");
 const crypto = require("crypto");
+const PDFDocument = require("pdfkit");
 
 const app = express();
 
@@ -52,7 +53,7 @@ app.use(express.static(
    Upload directory
 ----------------------------- */
 
-const uploadDir = path.join(__dirname, "uploads");
+const uploadDir = process.env.UPLOAD_DIR || path.join(__dirname, "uploads");
 
 fs.mkdirSync(uploadDir, {
   recursive: true
@@ -69,10 +70,10 @@ const upload = multer({
    SQLite Database
 ----------------------------- */
 
-const dbPath = path.join(
-  __dirname,
-  "data.sqlite"
-);
+const dbPath = process.env.DB_PATH || path.join(__dirname, "data.sqlite");
+
+// Ensure the parent directory exists (important when using a Railway Volume).
+fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
 const db = new Database(dbPath);
 
@@ -203,6 +204,9 @@ function addColumnIfMissing(table, column, definition) {
 addColumnIfMissing("users", "login_id", "TEXT");
 addColumnIfMissing("loans", "duration_days", "INTEGER DEFAULT 0");
 addColumnIfMissing("loans", "payment_frequency", "TEXT DEFAULT 'monthly'");
+addColumnIfMissing("loans", "agreement_created_at", "TEXT");
+addColumnIfMissing("loans", "signature_data", "TEXT");
+addColumnIfMissing("loans", "signed_at", "TEXT");
 
 db.prepare(`
   CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_id
@@ -1279,6 +1283,191 @@ app.get(
   }
 );
 
+
+/* -----------------------------
+   Loan Agreement PDF
+----------------------------- */
+function formatDate(value) {
+  if (!value) return "-";
+  const d = new Date(String(value) + (String(value).length === 10 ? "T00:00:00" : ""));
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "2-digit", year: "numeric" });
+}
+
+function loanAgreementData(loanId, userId = null) {
+  const q = userId
+    ? `SELECT loans.*, users.name customer_name, users.father_husband, users.mobile, users.email, users.address,
+              users.login_id, users.language
+       FROM loans JOIN users ON users.id=loans.customer_id
+       WHERE loans.id=? AND loans.customer_id=? LIMIT 1`
+    : `SELECT loans.*, users.name customer_name, users.father_husband, users.mobile, users.email, users.address,
+              users.login_id, users.language
+       FROM loans JOIN users ON users.id=loans.customer_id
+       WHERE loans.id=? LIMIT 1`;
+  return userId
+    ? db.prepare(q).get(loanId, userId)
+    : db.prepare(q).get(loanId);
+}
+
+function buildLoanAgreementPdf(loan, res) {
+  const doc = new PDFDocument({ size: "A4", margin: 45 });
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader(
+    "Content-Disposition",
+    `inline; filename="Loan-Agreement-${String(loan.loan_id).replace(/[^A-Za-z0-9_-]/g, "_")}.pdf"`
+  );
+  doc.pipe(res);
+
+  const line = (y) => {
+    doc.moveTo(45, y).lineTo(550, y).stroke();
+  };
+
+  doc.fontSize(18).font("Helvetica-Bold").text("EMERGENCY SANSTHA PVT LTD", { align: "center" });
+  doc.fontSize(12).font("Helvetica-Bold").text("LOAN AGREEMENT", { align: "center" });
+  doc.moveDown(0.6);
+  doc.fontSize(9).font("Helvetica").text(`Agreement generated: ${formatDate(loan.agreement_created_at || new Date().toISOString())}`, { align: "right" });
+  line(doc.y + 4);
+  doc.moveDown(0.7);
+
+  doc.fontSize(12).font("Helvetica-Bold").text("1. Customer Details");
+  doc.moveDown(0.25);
+  const customerRows = [
+    ["Customer Name", loan.customer_name],
+    ["Father / Husband Name", loan.father_husband || "-"],
+    ["Customer ID / User ID", loan.login_id || loan.mobile || "-"],
+    ["Registered Mobile", loan.mobile || "-"],
+    ["Email", loan.email || "-"],
+    ["Address", loan.address || "-"]
+  ];
+  customerRows.forEach(([a,b]) => {
+    doc.fontSize(10).font("Helvetica-Bold").text(`${a}: `, { continued: true });
+    doc.font("Helvetica").text(String(b));
+  });
+
+  doc.moveDown(0.7);
+  doc.fontSize(12).font("Helvetica-Bold").text("2. Loan Details");
+  doc.moveDown(0.25);
+  const loanRows = [
+    ["Loan ID", loan.loan_id],
+    ["Loan Product", loan.product],
+    ["Principal / Loan Amount", `INR ${Number(loan.principal || 0).toLocaleString("en-IN")}`],
+    ["Outstanding Amount", `INR ${Number(loan.outstanding || 0).toLocaleString("en-IN")}`],
+    ["Interest Rate", `${Number(loan.interest_rate || 0)}%`],
+    ["EMI Amount", `INR ${Number(loan.emi || 0).toLocaleString("en-IN")}`],
+    ["Loan Duration", `${Number(loan.duration_days || 0)} days`],
+    ["Payment Frequency", String(loan.payment_frequency || "monthly").toUpperCase()],
+    ["Loan Start Date", formatDate(loan.start_date)],
+    ["Current Status", loan.status || "active"],
+    ["Current DPD", String(loan.dpd || 0)]
+  ];
+  loanRows.forEach(([a,b]) => {
+    doc.fontSize(10).font("Helvetica-Bold").text(`${a}: `, { continued: true });
+    doc.font("Helvetica").text(String(b));
+  });
+
+  const paid = db.prepare("SELECT COALESCE(SUM(amount),0) total FROM loan_payments WHERE loan_id=?").get(loan.id).total || 0;
+  doc.moveDown(0.7);
+  doc.fontSize(12).font("Helvetica-Bold").text("3. Payment Summary");
+  doc.moveDown(0.25);
+  doc.fontSize(10).font("Helvetica").text(`Total payments recorded: INR ${Number(paid).toLocaleString("en-IN")}`);
+  doc.text(`Current outstanding: INR ${Number(loan.outstanding || 0).toLocaleString("en-IN")}`);
+
+  doc.moveDown(0.7);
+  doc.fontSize(12).font("Helvetica-Bold").text("4. Agreement");
+  doc.moveDown(0.3);
+  doc.fontSize(9.5).font("Helvetica").text(
+    "The customer confirms that the above customer and loan information has been provided for this loan record. " +
+    "The customer agrees to repay the applicable loan dues according to the agreed repayment schedule and the terms communicated by the lending institution. " +
+    "This document is a record of the loan details and customer acknowledgement."
+  );
+
+  doc.moveDown(0.7);
+  doc.fontSize(8.5).font("Helvetica").text(
+    "Important: This digitally generated document should be used together with the institution's applicable loan terms, disclosures, KYC/consent records and any legally required e-sign/e-stamp process."
+  );
+
+  doc.moveDown(1);
+  doc.fontSize(10).font("Helvetica-Bold").text("Customer Signature / Acknowledgement");
+  doc.moveDown(0.3);
+  if (loan.signature_data && /^data:image\/png;base64,/.test(loan.signature_data)) {
+    try {
+      const img = Buffer.from(loan.signature_data.split(",")[1], "base64");
+      doc.image(img, { fit: [220, 80], align: "left" });
+      doc.moveDown(0.2);
+      doc.fontSize(9).font("Helvetica").text(`Signed electronically on: ${formatDate(loan.signed_at)}`);
+    } catch (_) {
+      doc.fontSize(9).font("Helvetica").text("Signature image could not be rendered.");
+    }
+  } else {
+    doc.rect(45, doc.y, 220, 75).stroke();
+    doc.fontSize(9).font("Helvetica").text("Customer signature", 55, doc.y + 55);
+  }
+
+  doc.moveDown(1.2);
+  doc.fontSize(10).font("Helvetica-Bold").text("For Emergency Sanstha PVT LTD");
+  doc.fontSize(9).font("Helvetica").text("Authorized Representative");
+  doc.moveDown(0.8);
+  doc.fontSize(8).text("Loan ID: " + loan.loan_id);
+  doc.end();
+}
+
+app.get("/api/admin/loans/:id/agreement.pdf", auth, roles("admin"), (req, res) => {
+  const loan = loanAgreementData(Number(req.params.id));
+  if (!loan) return res.status(404).json({ error: "Loan not found" });
+  if (!loan.agreement_created_at) {
+    db.prepare("UPDATE loans SET agreement_created_at=? WHERE id=?").run(new Date().toISOString(), loan.id);
+    loan.agreement_created_at = new Date().toISOString();
+  }
+  return buildLoanAgreementPdf(loan, res);
+});
+
+app.get("/api/customer/loans/:id/agreement.pdf", auth, roles("customer", "investor"), (req, res) => {
+  const loan = loanAgreementData(Number(req.params.id), req.user.id);
+  if (!loan) return res.status(404).json({ error: "Loan not found" });
+  if (!loan.agreement_created_at) {
+    db.prepare("UPDATE loans SET agreement_created_at=? WHERE id=?").run(new Date().toISOString(), loan.id);
+    loan.agreement_created_at = new Date().toISOString();
+  }
+  return buildLoanAgreementPdf(loan, res);
+});
+
+app.post("/api/customer/loans/:id/sign-agreement", auth, roles("customer", "investor"), (req, res) => {
+  const loan = loanAgreementData(Number(req.params.id), req.user.id);
+  if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+  const signature = String(req.body?.signature_data || "");
+  if (!/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(signature)) {
+    return res.status(400).json({ error: "Valid signature is required" });
+  }
+  if (signature.length > 700000) {
+    return res.status(400).json({ error: "Signature image is too large" });
+  }
+
+  const signedAt = new Date().toISOString();
+  db.prepare(`
+    UPDATE loans
+    SET signature_data=?, signed_at=?, agreement_created_at=COALESCE(agreement_created_at,?)
+    WHERE id=? AND customer_id=?
+  `).run(signature, signedAt, signedAt, loan.id, req.user.id);
+
+  return res.json({
+    message: "Loan agreement signed successfully",
+    signed_at: signedAt,
+    loan_id: loan.loan_id
+  });
+});
+
+app.get("/api/admin/loans/:id/agreement-status", auth, roles("admin"), (req, res) => {
+  const loan = db.prepare("SELECT id, loan_id, signature_data, signed_at, agreement_created_at FROM loans WHERE id=? LIMIT 1").get(req.params.id);
+  if (!loan) return res.status(404).json({ error: "Loan not found" });
+  return res.json({
+    loan_id: loan.loan_id,
+    signed: Boolean(loan.signature_data),
+    signed_at: loan.signed_at || null,
+    agreement_created_at: loan.agreement_created_at || null
+  });
+});
+
 /* =====================================================
    ADMIN APIs
 ===================================================== */
@@ -1652,6 +1841,7 @@ app.post(
     const loan_id =
       idCode("LN");
 
+    const agreementCreatedAt = new Date().toISOString();
     db.prepare(`
       INSERT INTO loans
       (
@@ -1666,9 +1856,10 @@ app.post(
         start_date,
         duration_days,
         payment_frequency,
-        status
+        status,
+        agreement_created_at
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       customer_id,
       loan_id,
@@ -1683,7 +1874,8 @@ app.post(
       ["weekly", "monthly"].includes(String(payment_frequency).toLowerCase())
         ? String(payment_frequency).toLowerCase()
         : "monthly",
-      status
+      status,
+      agreementCreatedAt
     );
 
     const credentials =
