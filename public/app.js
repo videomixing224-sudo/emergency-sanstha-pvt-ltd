@@ -25,15 +25,16 @@ if(mode==="admin") el.innerHTML=`<form onsubmit="adminLogin(event)" class="form"
 <div class="field full"><label>Admin Email</label><input id="ae" type="email" required></div>
 <div class="field full"><label>Password</label><input id="ap" type="password" required></div>
 <div class="field full"><button class="btn">Login</button></div></form>`;
-else el.innerHTML=`<div class="notice">Customer registration/login is based on the registered mobile number. OTP is required.</div>
-<div class="form"><div class="field full"><label>Registered Mobile Number</label><input id="mobile" maxlength="10" placeholder="10-digit mobile"></div>
-<div class="field full"><label>Account Type</label><select id="role"><option value="customer">Customer</option><option value="investor">Investor Customer</option></select></div>
-<div class="field full"><button class="btn" onclick="requestOtp()">Send OTP</button></div>
-<div class="field full"><label>OTP</label><input id="otp" maxlength="6" placeholder="6-digit OTP"></div>
-<div class="field full"><button class="btn secondary" onclick="verifyOtp()">Verify & Login</button></div></div>
-<div id="otpmsg" class="muted"></div>`;
+else el.innerHTML=`<div class="notice">Customer User ID = registered mobile number. Password is given by Admin when the loan is created.</div>
+<form onsubmit="customerLogin(event)" class="form">
+<div class="field full"><label>User ID / Mobile Number</label><input id="clogin" inputmode="numeric" maxlength="10" placeholder="10-digit mobile number" required></div>
+<div class="field full"><label>Password</label><input id="cpass" type="password" placeholder="Customer password" required></div>
+<div class="field full"><button class="btn">Customer Login</button></div></form>
+<div class="notice" style="margin-top:12px">New customer? Admin must create the customer and loan first.</div>`;
 }
+
 async function adminLogin(e){e.preventDefault();try{const d=await api("/api/auth/admin-login",{method:"POST",body:{email:ae.value,password:ap.value}});setSession(d)}catch(e){alert(e.message)}}
+async function customerLogin(e){e.preventDefault();try{const d=await api("/api/auth/customer-login",{method:"POST",body:{login_id:clogin.value,password:cpass.value}});setSession(d)}catch(e){alert(e.message)}}
 async function requestOtp(){try{const d=await api("/api/auth/request-otp",{method:"POST",body:{mobile:mobile.value}});document.getElementById("otpmsg").textContent=d.demo_otp?`Demo OTP: ${d.demo_otp}`:d.message}catch(e){alert(e.message)}}
 async function verifyOtp(){try{const d=await api("/api/auth/verify-otp",{method:"POST",body:{mobile:mobile.value,otp:otp.value,role:role.value}});setSession(d)}catch(e){alert(e.message)}}
 function setSession(d){token=d.token;me=d.user;localStorage.setItem("es_token",token);localStorage.setItem("es_user",JSON.stringify(me));renderApp()}
@@ -61,32 +62,36 @@ const d=await api("/api/admin/stats"); document.getElementById("content").innerH
 }
 async function adminCustomers(){
 const rows=await api("/api/admin/customers");document.getElementById("content").innerHTML=`<div class="title"><h1>Customers</h1><div class="row"><button class="btn" onclick="openCustomerForm()">+ Add Customer</button><button class="btn secondary" onclick="location.href='/api/admin/export/customers'">Export CSV</button></div></div>
-<div class="table-wrap"><table class="table"><tr><th>Name</th><th>Type</th><th>Mobile</th><th>Father/Husband</th><th>Language</th><th>Status</th><th>Action</th></tr>${rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${r.role}</td><td>${esc(r.mobile)}</td><td>${esc(r.father_husband)}</td><td>${esc(r.language)}</td><td>${r.status}</td><td><button class="btn secondary" onclick='openCustomerForm(${JSON.stringify(r)})'>Edit</button></td></tr>`).join("")}</table></div>`;
+<div class="table-wrap"><table class="table"><tr><th>Name</th><th>Type</th><th>User ID</th><th>Mobile</th><th>Father/Husband</th><th>Language</th><th>Status</th><th>Action</th></tr>${rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${r.role}</td><td>${esc(r.login_id||r.mobile)}</td><td>${esc(r.mobile)}</td><td>${esc(r.father_husband)}</td><td>${esc(r.language)}</td><td>${r.status}</td><td><button class="btn secondary" onclick='openCustomerForm(${JSON.stringify(r)})'>Edit</button></td></tr>`).join("")}</table></div>`;
 }
 function openCustomerForm(r=null){
 const x=r||{};showModal(`<h2>${r?"Edit":"Add"} Customer</h2><form onsubmit="saveCustomer(event,${r?x.id:"null"})" class="form">
 <div class="field"><label>Name</label><input id="cn" value="${esc(x.name)}" required></div><div class="field"><label>Father/Husband Name</label><input id="cf" value="${esc(x.father_husband)}"></div>
-<div class="field"><label>Registered Mobile</label><input id="cm" value="${esc(x.mobile)}" required></div><div class="field"><label>Email</label><input id="ce" value="${esc(x.email)}"></div>
+<div class="field"><label>Registered Mobile</label><input id="cm" value="${esc(x.mobile)}" inputmode="numeric" maxlength="10" required></div><div class="field"><label>Email</label><input id="ce" value="${esc(x.email)}"></div><div class="field"><label>Password (optional)</label><input id="cpw" type="password" placeholder="Blank = auto generate"></div>
 <div class="field"><label>Type</label><select id="cr"><option value="customer" ${x.role==="customer"?"selected":""}>Customer</option><option value="investor" ${x.role==="investor"?"selected":""}>Investor Customer</option></select></div>
 <div class="field"><label>Language</label><select id="cl"><option>Hindi</option><option>English</option><option>Bhojpuri</option><option>Bengali</option><option>Marathi</option></select></div>
 <div class="field full"><label>Address</label><textarea id="ca">${esc(x.address)}</textarea></div><div class="field full"><button class="btn">Save</button></div></form>`);
 }
-async function saveCustomer(e,id){e.preventDefault();try{const body={name:cn.value,father_husband:cf.value,mobile:cm.value,email:ce.value,role:cr.value,language:cl.value,address:ca.value};await api(id?`/api/admin/customers/${id}`:"/api/admin/customers",{method:id?"PUT":"POST",body});closeModal();adminCustomers()}catch(e){alert(e.message)}}
+async function saveCustomer(e,id){e.preventDefault();try{const body={name:cn.value,father_husband:cf.value,mobile:cm.value,email:ce.value,role:cr.value,language:cl.value,address:ca.value,password:cpw.value};const result=await api(id?`/api/admin/customers/${id}`:"/api/admin/customers",{method:id?"PUT":"POST",body});closeModal();adminCustomers();if(!id)alert(result.message+(result.temporary_password?`\\n\\nUser ID: ${result.customer_user_id}\\nPassword: ${result.temporary_password}`:""))}catch(e){alert(e.message)}}
 
 async function adminLoans(){
 const rows=await api("/api/admin/loans");document.getElementById("content").innerHTML=`<div class="title"><h1>Loan Management</h1><div class="row"><button class="btn" onclick="openLoanForm()">+ New Loan</button><button class="btn secondary" onclick="location.href='/api/admin/export/loans'">Export CSV</button></div></div>
-<div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Customer</th><th>Product</th><th>Principal</th><th>Outstanding</th><th>Interest</th><th>EMI</th><th>DPD</th><th>Status</th></tr>${rows.map(r=>`<tr><td>${r.loan_id}</td><td>${esc(r.customer_name)}<br><small>${r.mobile}</small></td><td>${esc(r.product)}</td><td>${money(r.principal)}</td><td>${money(r.outstanding)}</td><td>${r.interest_rate}%</td><td>${money(r.emi)}</td><td>${r.dpd}</td><td>${r.status}</td></tr>`).join("")}</table></div>`;
+<div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Customer</th><th>Product</th><th>Principal</th><th>Outstanding</th><th>Interest</th><th>EMI</th><th>Duration</th><th>Payment</th><th>DPD</th><th>Status</th><th>Action</th></tr>${rows.map(r=>`<tr><td>${r.loan_id}</td><td>${esc(r.customer_name)}<br><small>${r.mobile}</small></td><td>${esc(r.product)}</td><td>${money(r.principal)}</td><td>${money(r.outstanding)}</td><td>${r.interest_rate}%</td><td>${money(r.emi)}</td><td>${r.duration_days||0} days</td><td>${r.payment_frequency||"monthly"}</td><td>${r.dpd}</td><td>${r.status}</td><td><button class="btn secondary" onclick="markLoanClear(${r.id})">Clear</button> <button class="btn secondary" onclick="deleteLoan(${r.id},${JSON.stringify(r.status)})">Delete</button></td></tr>`).join("")}</table></div>`;
 }
+async function markLoanClear(id){try{await api(`/api/admin/loans/${id}/clear`,{method:"POST"});adminLoans()}catch(e){alert(e.message)}}
+async function deleteLoan(id,status){if(!["cleared","closed"].includes(String(status).toLowerCase())){alert("Pehle loan ko Clear karein. Sirf cleared/closed loan delete ho sakta hai.");return}if(!confirm("Kya aap is cleared loan ko permanently delete karna chahte hain?"))return;try{await api(`/api/admin/loans/${id}`,{method:"DELETE"});adminLoans()}catch(e){alert(e.message)}}
 async function openLoanForm(){
 const customers=await api("/api/admin/customers");showModal(`<h2>Create Loan</h2><form onsubmit="saveLoan(event)" class="form">
 <div class="field"><label>Customer</label><select id="lc">${customers.map(c=>`<option value="${c.id}">${esc(c.name)} - ${esc(c.mobile)}</option>`).join("")}</select></div>
 <div class="field"><label>Loan Product</label><select id="lp"><option>Personal Loan</option><option>Home Loan</option><option>Loan Against Property</option><option>Gold Loan</option><option>Product Loan</option></select></div>
 <div class="field"><label>Principal Amount</label><input id="lpr" type="number" required></div><div class="field"><label>Outstanding Amount</label><input id="lo" type="number"></div>
 <div class="field"><label>Interest Rate %</label><input id="li" type="number" step="0.01"></div><div class="field"><label>EMI</label><input id="le" type="number"></div>
-<div class="field"><label>DPD</label><input id="ld" type="number"></div><div class="field"><label>Start Date</label><input id="ls" type="date"></div>
+<div class="field"><label>DPD</label><input id="ld" type="number" min="0"></div><div class="field"><label>Start Date</label><input id="ls" type="date"></div>
+<div class="field"><label>Loan Duration (Days)</label><input id="ldays" type="number" min="1" required></div><div class="field"><label>Payment Frequency</label><select id="lf"><option value="monthly">Monthly</option><option value="weekly">Weekly</option></select></div>
+<div class="field full"><label>Customer Password (optional)</label><input id="lpw" type="password" placeholder="Blank = auto generate"></div>
 <div class="field full"><button class="btn">Create Loan</button></div></form>`);
 }
-async function saveLoan(e){e.preventDefault();try{await api("/api/admin/loans",{method:"POST",body:{customer_id:lc.value,product:lp.value,principal:lpr.value,outstanding:lo.value,interest_rate:li.value,emi:le.value,dpd:ld.value,start_date:ls.value}});closeModal();adminLoans()}catch(e){alert(e.message)}}
+async function saveLoan(e){e.preventDefault();try{const result=await api("/api/admin/loans",{method:"POST",body:{customer_id:lc.value,product:lp.value,principal:lpr.value,outstanding:lo.value,interest_rate:li.value,emi:le.value,dpd:ld.value,start_date:ls.value,duration_days:ldays.value,payment_frequency:lf.value,password:lpw.value}});closeModal();adminLoans();alert(result.message+(result.temporary_password?`\\n\\nUser ID: ${result.customer_user_id}\\nPassword: ${result.temporary_password}`:""))}catch(e){alert(e.message)}}
 
 async function adminInvestments(){
 const rows=await api("/api/admin/investments");document.getElementById("content").innerHTML=`<div class="title"><h1>Investment Management</h1><div class="row"><button class="btn" onclick="openInvestmentForm()">+ Add Investment</button><button class="btn secondary" onclick="location.href='/api/admin/export/investments'">Export CSV</button></div></div>
@@ -128,7 +133,7 @@ const d=await api("/api/customer/dashboard");document.getElementById("content").
 <div class="card" style="margin-top:18px"><h2>Customer Details</h2><p><b>Customer Name:</b> ${esc(d.user.name)}</p><p><b>Father/Husband:</b> ${esc(d.user.father_husband)}</p><p><b>Registered Mobile:</b> ${esc(d.user.mobile)}</p><p><b>Address:</b> ${esc(d.user.address)}</p><p><b>Language:</b> ${esc(d.user.language)}</p></div>`;
 }
 async function custLoans(){
-const d=await api("/api/customer/dashboard");document.getElementById("content").innerHTML=`<div class="title"><h1>My Loan</h1></div><div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Product</th><th>Loan Amount</th><th>Outstanding</th><th>Interest</th><th>EMI</th><th>DPD</th><th>Status</th></tr>${d.loans.map(r=>`<tr><td>${r.loan_id}</td><td>${esc(r.product)}</td><td>${money(r.principal)}</td><td>${money(r.outstanding)}</td><td>${r.interest_rate}%</td><td>${money(r.emi)}</td><td>${r.dpd}</td><td>${r.status}</td></tr>`).join("")||"<tr><td colspan=8>No loan found</td></tr>"}</table></div>`;
+const d=await api("/api/customer/dashboard");document.getElementById("content").innerHTML=`<div class="title"><h1>My Loan</h1></div><div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Product</th><th>Loan Amount</th><th>Outstanding</th><th>Interest</th><th>EMI</th><th>Duration</th><th>Payment</th><th>DPD</th><th>Status</th></tr>${d.loans.map(r=>`<tr><td>${r.loan_id}</td><td>${esc(r.product)}</td><td>${money(r.principal)}</td><td>${money(r.outstanding)}</td><td>${r.interest_rate}%</td><td>${money(r.emi)}</td><td>${r.duration_days||0} days</td><td>${r.payment_frequency||"monthly"}</td><td>${r.dpd}</td><td>${r.status}</td></tr>`).join("")||"<tr><td colspan=8>No loan found</td></tr>"}</table></div>`;
 }
 function custInsurance(){document.getElementById("content").innerHTML=`<div class="card"><h1>Insurance</h1><div class="notice">Insurance is currently <b>Not Available</b>.</div></div>`}
 function custRequest(){document.getElementById("content").innerHTML=`<div class="card"><h1>Service Request</h1><p class="muted">Support: 06479451097</p><form onsubmit="sendRequest(event)" class="form"><div class="field"><label>Subject</label><input id="rs" required></div><div class="field"><label>Message</label><textarea id="rm" required></textarea></div><div class="field full"><button class="btn">Submit Request</button></div></form></div>`}

@@ -95,13 +95,10 @@ CREATE TABLE IF NOT EXISTS users(
  password_hash TEXT,
  language TEXT DEFAULT 'Hindi',
  status TEXT DEFAULT 'active',
+ login_id TEXT,
  created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
-ALTER TABLE users ADD COLUMN login_id TEXT;
-
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_id
-ON users(login_id);
 
 CREATE TABLE IF NOT EXISTS otp_codes(
  id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,6 +177,25 @@ CREATE TABLE IF NOT EXISTS closure_requests(
  FOREIGN KEY(customer_id) REFERENCES users(id)
 );
 `);
+
+/* -----------------------------
+   Safe schema migrations
+----------------------------- */
+function addColumnIfMissing(table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!columns.some(c => c.name === column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  }
+}
+
+addColumnIfMissing("users", "login_id", "TEXT");
+addColumnIfMissing("loans", "duration_days", "INTEGER DEFAULT 0");
+addColumnIfMissing("loans", "payment_frequency", "TEXT DEFAULT 'monthly'");
+
+db.prepare(`
+  CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_id
+  ON users(login_id)
+`).run();
 
 /* -----------------------------
    Admin Seed / Sync
@@ -264,8 +280,8 @@ db.prepare(`
 
   if (mobileUser?.mobile) {
     const mobile = String(mobileUser.mobile)
-      .replace(/\\D/g, "")
-      .replace(/^91(?=\\d{10}$)/, "");
+      .replace(/\D/g, "")
+      .replace(/^91(?=\d{10}$)/, "");
 
     db.prepare(`
       UPDATE users
@@ -423,7 +439,7 @@ function generateCustomerPassword() {
   return value;
 }
 
-function ensureCustomerCredentials(userId) {
+function ensureCustomerCredentials(userId, requestedPassword = "") {
   const user = db.prepare(`
     SELECT *
     FROM users
@@ -439,15 +455,18 @@ function ensureCustomerCredentials(userId) {
   const loginId = customerLoginId(user.id);
   let temporaryPassword = null;
 
-  // Always keep customer login_id equal to the mobile number.
   db.prepare(`
     UPDATE users
     SET login_id=?
     WHERE id=?
   `).run(loginId, user.id);
 
-  if (!user.password_hash) {
-    temporaryPassword = generateCustomerPassword();
+  if (!user.password_hash || requestedPassword) {
+    temporaryPassword = String(requestedPassword || generateCustomerPassword()).trim();
+
+    if (temporaryPassword.length < 6) {
+      throw new Error("Password must be at least 6 characters");
+    }
 
     db.prepare(`
       UPDATE users
@@ -888,8 +907,8 @@ app.post(
         req.body?.login_id ||
         req.body?.user_id ||
         ""
-      ).replace(/\\D/g, "")
-       .replace(/^91(?=\\d{10}$)/, "");
+      ).replace(/\D/g, "")
+       .replace(/^91(?=\d{10}$)/, "");
 
       const password = String(
         req.body?.password || ""
@@ -1337,7 +1356,8 @@ app.post(
       mobile,
       email,
       address,
-      language = "Hindi"
+      language = "Hindi",
+      password = ""
     } = req.body;
 
     if (!name || !mobile) {
@@ -1345,6 +1365,16 @@ app.post(
       return res.status(400).json({
         error:
           "Name and mobile are required"
+      });
+    }
+
+    const normalizedMobile = String(mobile)
+      .replace(/\D/g, "")
+      .replace(/^91(?=\d{10}$)/, "");
+
+    if (!/^[6-9]\d{9}$/.test(normalizedMobile)) {
+      return res.status(400).json({
+        error: "Enter a valid 10-digit Indian mobile number"
       });
     }
 
@@ -1364,22 +1394,42 @@ app.post(
           mobile,
           email,
           address,
-          language
+          language,
+          login_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         finalRole,
         name,
         father_husband || "",
-        mobile,
+        normalizedMobile,
         email || "",
         address || "",
-        language
+        language,
+        normalizedMobile
       );
 
+      let credentials = {
+        login_id: normalizedMobile,
+        temporary_password: null
+      };
+
+      // Password is optional at customer creation. If Admin does not set one,
+      // the password is generated when the first loan is created.
+      if (String(password || "").trim()) {
+        credentials = ensureCustomerCredentials(
+          result.lastInsertRowid,
+          password
+        );
+      }
+
       return res.json({
-        user:
-          safeUser(result.lastInsertRowid)
+        user: safeUser(result.lastInsertRowid),
+        customer_user_id: credentials.login_id,
+        temporary_password: credentials.temporary_password,
+        message: credentials.temporary_password
+          ? `Customer created. User ID: ${credentials.login_id} | Password: ${credentials.temporary_password}`
+          : `Customer created. User ID: ${credentials.login_id}. Password will be generated when the loan is created.`
       });
 
     } catch (error) {
@@ -1452,6 +1502,56 @@ app.put(
 );
 
 /* -----------------------------
+   Delete Customer (only after all loans are cleared)
+----------------------------- */
+app.delete("/api/admin/customers/:id", auth, roles("admin"), (req, res) => {
+  const userId = Number(req.params.id);
+  const customer = db.prepare(`
+    SELECT id, role, name
+    FROM users
+    WHERE id=? AND role IN ('customer','investor')
+    LIMIT 1
+  `).get(userId);
+
+  if (!customer) {
+    return res.status(404).json({ error: "Customer not found" });
+  }
+
+  const activeLoan = db.prepare(`
+    SELECT id
+    FROM loans
+    WHERE customer_id=?
+      AND NOT (
+        outstanding <= 0
+        OR LOWER(status) IN ('cleared','closed')
+      )
+    LIMIT 1
+  `).get(userId);
+
+  if (activeLoan) {
+    return res.status(400).json({
+      error: "Customer cannot be deleted while any loan is outstanding"
+    });
+  }
+
+  const transaction = db.transaction(() => {
+    db.prepare("DELETE FROM closure_requests WHERE customer_id=?").run(userId);
+    db.prepare("DELETE FROM service_requests WHERE customer_id=?").run(userId);
+    db.prepare("DELETE FROM mandates WHERE customer_id=?").run(userId);
+    db.prepare("DELETE FROM documents WHERE customer_id=?").run(userId);
+    db.prepare("DELETE FROM investments WHERE customer_id=?").run(userId);
+    db.prepare("DELETE FROM loans WHERE customer_id=?").run(userId);
+    db.prepare("DELETE FROM users WHERE id=?").run(userId);
+  });
+
+  transaction();
+
+  return res.json({
+    message: "Customer and cleared loan records deleted successfully"
+  });
+});
+
+/* -----------------------------
    Admin Loans
 ----------------------------- */
 
@@ -1495,6 +1595,9 @@ app.post(
       emi,
       dpd,
       start_date,
+      duration_days,
+      payment_frequency = "monthly",
+      password = "",
       status = "active"
     } = req.body;
 
@@ -1521,9 +1624,11 @@ app.post(
         emi,
         dpd,
         start_date,
+        duration_days,
+        payment_frequency,
         status
       )
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       customer_id,
       loan_id,
@@ -1534,12 +1639,17 @@ app.post(
       Number(emi) || 0,
       Number(dpd) || 0,
       start_date || "",
+      Math.max(0, Number(duration_days) || 0),
+      ["weekly", "monthly"].includes(String(payment_frequency).toLowerCase())
+        ? String(payment_frequency).toLowerCase()
+        : "monthly",
       status
     );
 
     const credentials =
       ensureCustomerCredentials(
-        Number(customer_id)
+        Number(customer_id),
+        password
       );
 
     return res.json({
@@ -1555,7 +1665,7 @@ app.post(
         ),
       message:
         credentials.temporary_password
-          ? `Loan created. Customer Login ID: ${credentials.login_id} | Password: ${credentials.temporary_password}`
+          ? `Loan created. Customer User ID: ${credentials.login_id} | Password: ${credentials.temporary_password}`
           : `Loan created. Customer Login ID: ${credentials.login_id}. Existing password kept.`
     });
   }
@@ -1629,6 +1739,8 @@ app.put(
       emi,
       dpd,
       start_date,
+      duration_days,
+      payment_frequency,
       status
     } = req.body;
 
@@ -1642,6 +1754,8 @@ app.put(
         emi=?,
         dpd=?,
         start_date=?,
+        duration_days=?,
+        payment_frequency=?,
         status=?
       WHERE id=?
     `).run(
@@ -1652,6 +1766,10 @@ app.put(
       Number(emi) || 0,
       Number(dpd) || 0,
       start_date || "",
+      Math.max(0, Number(duration_days) || 0),
+      ["weekly", "monthly"].includes(String(payment_frequency).toLowerCase())
+        ? String(payment_frequency).toLowerCase()
+        : "monthly",
       status || "active",
       req.params.id
     );
@@ -1662,6 +1780,51 @@ app.put(
     });
   }
 );
+
+/* -----------------------------
+   Mark Loan Cleared
+----------------------------- */
+app.post("/api/admin/loans/:id/clear", auth, roles("admin"), (req, res) => {
+  const loan = db.prepare("SELECT id FROM loans WHERE id=? LIMIT 1").get(req.params.id);
+  if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+  db.prepare(`
+    UPDATE loans
+    SET outstanding=0, status='cleared'
+    WHERE id=?
+  `).run(req.params.id);
+
+  return res.json({ message: "Loan marked as cleared" });
+});
+
+/* -----------------------------
+   Delete Cleared Loan
+----------------------------- */
+app.delete("/api/admin/loans/:id", auth, roles("admin"), (req, res) => {
+  const loan = db.prepare(`
+    SELECT id, loan_id, outstanding, status
+    FROM loans
+    WHERE id=?
+    LIMIT 1
+  `).get(req.params.id);
+
+  if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+  const cleared =
+    Number(loan.outstanding || 0) <= 0 ||
+    ["cleared", "closed"].includes(String(loan.status).toLowerCase());
+
+  if (!cleared) {
+    return res.status(400).json({
+      error: "Only cleared/closed loans can be deleted"
+    });
+  }
+
+  db.prepare("DELETE FROM closure_requests WHERE loan_id=?").run(loan.loan_id);
+  db.prepare("DELETE FROM loans WHERE id=?").run(req.params.id);
+
+  return res.json({ message: "Cleared loan deleted successfully" });
+});
 
 /* -----------------------------
    Admin Investments

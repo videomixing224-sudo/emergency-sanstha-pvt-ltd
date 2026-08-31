@@ -4,7 +4,7 @@ Full-stack starter for:
 - Admin Panel
 - Customer Panel
 - Investor Panel / Customer Invest Plan
-- Mobile + OTP login flow
+- Admin-created customer login: mobile number as User ID + password
 - Loan management
 - Investment management
 - Documents
@@ -39,3 +39,14 @@ With `OTP_MODE=demo`, the API returns the OTP in the JSON response for testing. 
 - Add KYC/consent/audit requirements appropriate to your business and jurisdiction.
 - Add database backups and monitoring.
 - Review applicable RBI, lending, KYC/AML, privacy and data-retention requirements with qualified professionals before going live.
+
+
+## Loan workflow
+- Admin creates/selects a customer and gives a loan.
+- Customer User ID is always the registered 10-digit mobile number.
+- Admin can set a password or leave it blank for a secure auto-generated password.
+- Loan duration is stored in days.
+- Payment frequency can be Weekly or Monthly.
+- Admin can mark a loan as Cleared (outstanding becomes ₹0).
+- Cleared/closed loans can be deleted.
+- A customer can be deleted only when there is no outstanding loan.
