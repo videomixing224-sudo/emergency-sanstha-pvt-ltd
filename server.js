@@ -50,10 +50,17 @@ app.use(express.static(
 ));
 
 /* -----------------------------
+   Data directory
+----------------------------- */
+
+const dataDir = process.env.DATA_DIR || __dirname;
+fs.mkdirSync(dataDir, { recursive: true });
+
+/* -----------------------------
    Upload directory
 ----------------------------- */
 
-const uploadDir = process.env.UPLOAD_DIR || path.join(__dirname, "uploads");
+const uploadDir = process.env.UPLOAD_DIR || path.join(dataDir, "uploads");
 
 fs.mkdirSync(uploadDir, {
   recursive: true
@@ -70,10 +77,7 @@ const upload = multer({
    SQLite Database
 ----------------------------- */
 
-const dbPath = process.env.DB_PATH || path.join(__dirname, "data.sqlite");
-
-// Ensure the parent directory exists (important when using a Railway Volume).
-fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+const dbPath = path.join(dataDir, "data.sqlite");
 
 const db = new Database(dbPath);
 
@@ -345,8 +349,13 @@ function auth(req, res, next) {
 
   const header =
     req.headers.authorization || "";
+  const queryToken =
+    typeof req.query.token === "string" ? req.query.token : "";
+  const bearerToken = header.startsWith("Bearer ")
+    ? header.slice(7)
+    : queryToken;
 
-  if (!header.startsWith("Bearer ")) {
+  if (!bearerToken) {
 
     return res.status(401).json({
       error: "Login required"
@@ -356,7 +365,7 @@ function auth(req, res, next) {
   try {
 
     req.user = jwt.verify(
-      header.slice(7),
+      bearerToken,
       JWT_SECRET
     );
 
@@ -1366,10 +1375,21 @@ function buildLoanAgreementPdf(loan, res) {
   });
 
   const paid = db.prepare("SELECT COALESCE(SUM(amount),0) total FROM loan_payments WHERE loan_id=?").get(loan.id).total || 0;
+  const principal = Number(loan.principal || 0);
+  const emi = Number(loan.emi || 0);
+  const frequency = String(loan.payment_frequency || "monthly").toLowerCase();
+  const durationDays = Number(loan.duration_days || 0);
+  const periods = durationDays > 0
+    ? Math.max(1, Math.ceil(durationDays / (frequency === "weekly" ? 7 : 30)))
+    : 0;
+  const scheduledPayable = periods > 0 && emi > 0 ? emi * periods : Number(loan.outstanding || principal || 0);
   doc.moveDown(0.7);
   doc.fontSize(12).font("Helvetica-Bold").text("3. Payment Summary");
   doc.moveDown(0.25);
-  doc.fontSize(10).font("Helvetica").text(`Total payments recorded: INR ${Number(paid).toLocaleString("en-IN")}`);
+  doc.fontSize(10).font("Helvetica").text(`Total loan amount: INR ${principal.toLocaleString("en-IN")}`);
+  doc.text(`Scheduled EMI count: ${periods || "-"}`);
+  doc.text(`Scheduled total payable (based on EMI): INR ${scheduledPayable.toLocaleString("en-IN")}`);
+  doc.text(`Total payments recorded: INR ${Number(paid).toLocaleString("en-IN")}`);
   doc.text(`Current outstanding: INR ${Number(loan.outstanding || 0).toLocaleString("en-IN")}`);
 
   doc.moveDown(0.7);
