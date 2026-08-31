@@ -409,19 +409,15 @@ app.post(
 
 /* -----------------------------
    Request REAL SMS OTP via 2Factor
-   SMS channel is explicitly selected.
+   SMS-only endpoint: manual OTP generation.
 ----------------------------- */
 
 app.post(
   "/api/auth/request-otp",
   otpLimiter,
   async (req, res) => {
-
     try {
-
-      const mobile =
-        String(req.body.mobile || "")
-          .replace(/\D/g, "");
+      const mobile = String(req.body.mobile || "").replace(/\D/g, "");
 
       if (!/^[6-9]\d{9}$/.test(mobile)) {
         return res.status(400).json({
@@ -429,10 +425,9 @@ app.post(
         });
       }
 
-      const code = String(
-        crypto.randomInt(100000, 1000000)
-      );
-
+      // Generate the OTP locally so the same value is used for
+      // both the SMS and the verification step.
+      const code = String(crypto.randomInt(100000, 1000000));
       const hash = bcrypt.hashSync(code, 10);
 
       db.prepare(
@@ -449,8 +444,6 @@ app.post(
         Date.now() + 5 * 60 * 1000
       );
 
-      // 2Factor account/API key
-      // Keep the existing Railway variable name for compatibility.
       const apiKey =
         process.env.TWOFATOR_API_KEY ||
         process.env.TWOFACTOR_API_KEY;
@@ -460,9 +453,7 @@ app.post(
           "DELETE FROM otp_codes WHERE mobile=?"
         ).run(mobile);
 
-        console.error(
-          "TWOFATOR_API_KEY / TWOFACTOR_API_KEY is missing"
-        );
+        console.error("2Factor API key is missing");
 
         return res.status(500).json({
           error: "SMS service is not configured"
@@ -470,62 +461,40 @@ app.post(
       }
 
       /*
-       * SMS-ONLY mode
+       * SMS-ONLY:
+       * Use 2Factor's manual-generation SMS endpoint.
        *
-       * Do NOT use 2Factor's OTP/SEND endpoint here because their
-       * OTP platform may use voice fallback. We send the already
-       * generated OTP through the Transactional SMS API instead.
+       * /API/V1/{api_key}/SMS/{phone_number}/{otp_value}/{template}
        *
-       * Required Railway variables:
-       *   TWOFATOR_API_KEY   (or TWOFACTOR_API_KEY)
-       *   TSMS_TEMPLATE_NAME (approved Transactional SMS template)
-       *   TSMS_SENDER_ID    (approved sender/header, e.g. TFACTR)
-       *
-       * The template must contain a placeholder for VAR1.
+       * This is the SMS-specific endpoint shown in the 2Factor
+       * "Send OTP - Custom OTP" documentation.
        */
       const template =
+        process.env.OTP_TEMPLATE_NAME ||
         process.env.TSMS_TEMPLATE_NAME ||
         process.env.TRANSACTIONAL_TEMPLATE_NAME ||
-        process.env.OTP_TEMPLATE_NAME ||
-        process.env.OTP_TEMPLATE;
+        "OTP1";
 
-      const senderId =
-        process.env.TSMS_SENDER_ID ||
-        process.env.TRANSACTIONAL_SENDER_ID;
-
-      if (!template || !senderId) {
-        db.prepare(
-          "DELETE FROM otp_codes WHERE mobile=?"
-        ).run(mobile);
-
-        console.error(
-          "Transactional SMS configuration missing: TSMS_TEMPLATE_NAME and TSMS_SENDER_ID are required"
-        );
-
-        return res.status(500).json({
-          error:
-            "SMS template/sender is not configured"
-        });
-      }
-
-      const tsmsUrl =
+      const smsUrl =
         "https://2factor.in/API/V1/" +
         encodeURIComponent(apiKey) +
-        "/ADDON_SERVICES/SEND/TSMS";
+        "/SMS/" +
+        encodeURIComponent("91" + mobile) +
+        "/" +
+        encodeURIComponent(code) +
+        "/" +
+        encodeURIComponent(template);
 
-      const form = new URLSearchParams();
-      form.set("From", senderId);
-      form.set("To", "91" + mobile);
-      form.set("TemplateName", template);
-      form.set("VAR1", code);
+      console.log("Sending SMS-only OTP via 2Factor", {
+        mobile: "91" + mobile,
+        template
+      });
 
-      const smsResponse = await fetch(tsmsUrl, {
-        method: "POST",
+      const smsResponse = await fetch(smsUrl, {
+        method: "GET",
         headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
           "Accept": "application/json, text/plain, */*"
-        },
-        body: form.toString()
+        }
       });
 
       const rawText = await smsResponse.text();
@@ -534,16 +503,16 @@ app.post(
       try {
         smsData = JSON.parse(rawText);
       } catch (_) {
-        // Legacy 2Factor responses can be plain text.
+        // Some legacy 2Factor responses may be plain text.
       }
 
       const providerStatus = String(
         smsData?.Status ??
         smsData?.status ??
-        rawText
+        ""
       ).trim().toLowerCase();
 
-      console.log("2Factor Transactional SMS response:", {
+      console.log("2Factor SMS-only response:", {
         http_status: smsResponse.status,
         provider_status:
           smsData?.Status ?? smsData?.status ?? null,
@@ -567,7 +536,8 @@ app.post(
         ).run(mobile);
 
         return res.status(502).json({
-          error: "Unable to send SMS OTP"
+          error: "Unable to send SMS OTP",
+          provider_response: rawText
         });
       }
 
@@ -576,8 +546,7 @@ app.post(
       });
 
     } catch (error) {
-
-      console.error("2Factor SMS OTP error:", error);
+      console.error("2Factor SMS-only OTP error:", error);
 
       return res.status(500).json({
         error: "Failed to send SMS OTP"
