@@ -449,14 +449,14 @@ app.post(
         Date.now() + 5 * 60 * 1000
       );
 
-      const apiKey = process.env.TWOFATOR_API_KEY;
+      const apiKey = process.env.TWOFACTOR_API_KEY;
 
       if (!apiKey) {
         db.prepare(
           "DELETE FROM otp_codes WHERE mobile=?"
         ).run(mobile);
 
-        console.error("TWOFATOR_API_KEY is missing");
+        console.error("TWOFACTOR_API_KEY is missing");
 
         return res.status(500).json({
           error: "SMS service is not configured"
