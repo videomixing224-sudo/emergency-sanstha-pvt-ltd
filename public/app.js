@@ -51,15 +51,6 @@ async function requestOtp(){try{const d=await api("/api/auth/request-otp",{metho
 async function verifyOtp(){try{const d=await api("/api/auth/verify-otp",{method:"POST",body:{mobile:mobile.value,otp:otp.value,role:role.value}});setSession(d)}catch(e){alert(e.message)}}
 function setSession(d){token=d.token;me=d.user;localStorage.setItem("es_token",token);localStorage.setItem("es_user",JSON.stringify(me));renderApp()}
 
-async function openAuthenticatedPdf(url){
-  if(!token){alert("Login required. Please login again.");return}
-  const sep=url.includes("?")?"&":"?";
-  const authUrl=url+sep+"token="+encodeURIComponent(token);
-  const popup=window.open(authUrl,"_blank");
-  if(!popup){alert("Please allow pop-ups for this website to open the PDF.");}
-}
-
-
 async function renderApp(){
  if(!token){renderLogin();return}
  if(me.role==="admin") renderAdmin(); else renderCustomer();
@@ -117,7 +108,7 @@ async function openAgreement(id){
       <b>Agreement:</b> Generated<br>
       <b>Customer Signature:</b> ${status.signed ? "Signed on "+esc(status.signed_at||"") : "Not signed yet"}</div>
       <div class="row" style="margin-top:12px">
-        <button class="btn" onclick="openAuthenticatedPdf('/api/admin/loans/${id}/agreement.pdf')">Open / Print PDF</button>
+        <button class="btn" onclick="window.open('/api/admin/loans/${id}/agreement.pdf','_blank')">Open / Print PDF</button>
         <button class="btn secondary" onclick="closeModal()">Close</button>
       </div>`);
   }catch(e){alert(e.message)}
@@ -224,10 +215,9 @@ async function openCustomerAgreement(id,loanCode){
     showModal(`<h2>Loan Agreement - ${esc(loanCode)}</h2>
       <div class="notice">Please read the agreement PDF before signing. Your signature will be stored with this loan record.</div>
       <div class="row" style="margin:12px 0">
-        <button class="btn" onclick="openAuthenticatedPdf('/api/customer/loans/${id}/agreement.pdf')">View Agreement PDF</button>
+        <button class="btn" onclick="window.open('/api/customer/loans/${id}/agreement.pdf','_blank')">View Agreement PDF</button>
       </div>
       <h3>Customer Signature</h3>
-      <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0 12px"><input id="agreementConsent" type="checkbox" style="margin-top:4px"> <span>I have read the loan agreement and confirm that the customer and loan details shown in it are correct.</span></label>
       <canvas id="sigCanvas" width="520" height="180" style="width:100%;max-width:520px;border:1px solid #bbb;border-radius:8px;background:#fff;touch-action:none"></canvas>
       <div class="row" style="margin-top:10px">
         <button type="button" class="btn secondary" onclick="clearSignature()">Clear Signature</button>
@@ -252,13 +242,12 @@ function initSignatureCanvas(){
 }
 function clearSignature(){signaturePadState?.clear()}
 async function submitSignature(id){
-  if(!document.getElementById("agreementConsent")?.checked){alert("Please confirm that you have read the agreement and checked the confirmation box.");return}
   if(!signaturePadState?.has){alert("Please sign in the signature box first.");return}
   try{
     const signature_data=signaturePadState.c.toDataURL("image/png");
     const result=await api(`/api/customer/loans/${id}/sign-agreement`,{method:"POST",body:{signature_data}});
     alert(result.message);
-    await openAuthenticatedPdf(`/api/customer/loans/${id}/agreement.pdf`);
+    window.open(`/api/customer/loans/${id}/agreement.pdf`,"_blank");
     closeModal();
   }catch(e){alert(e.message)}
 }
