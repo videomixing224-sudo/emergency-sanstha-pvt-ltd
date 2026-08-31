@@ -14,24 +14,36 @@ function logout(){localStorage.clear();token=null;me=null;renderLogin()}
 function esc(s){return String(s??"").replace(/[&<>"']/g,m=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;"}[m]))}
 
 function renderLogin(){
-app.innerHTML=`<div class="login"><div class="loginbox">
-<h1>Emergency Sanstha Pvt Ltd</h1><p class="muted">Loan & Customer Management Portal</p>
-<div class="tabs"><button class="btn" onclick="loginMode('customer')">Customer / Investor</button><button class="btn secondary" onclick="loginMode('admin')">Admin</button></div>
-<div id="loginarea"></div></div></div>`; loginMode("customer");
+app.innerHTML=`<div class="login-page">
+  <div class="login-brand"><img src="/logo.png" alt="Emergency Sanstha Loan PVT LTD logo"><div class="login-brand-title">Emergency Sanstha PVT LTD</div><div class="login-brand-subtitle">Loan & Customer Management Portal</div></div>
+  <div class="login-cards">
+    <section class="login-card admin-card">
+      <img class="login-card-logo" src="/logo.png" alt="Emergency Sanstha logo">
+      <h1>Admin Login</h1>
+      <p class="muted">Sign in to access admin panel</p>
+      <form onsubmit="adminLogin(event)" class="form">
+        <div class="field full"><label>Admin Email</label><input id="ae" type="email" autocomplete="username" required></div>
+        <div class="field full"><label>Password</label><input id="ap" type="password" autocomplete="current-password" required></div>
+        <div class="field full"><button class="btn login-btn admin-login-btn">Login as Admin →</button></div>
+      </form>
+      <div class="secure-login">🔒 Secure Admin Access</div>
+    </section>
+    <section class="login-card customer-card">
+      <img class="login-card-logo" src="/logo.png" alt="Emergency Sanstha logo">
+      <h1>Customer Login</h1>
+      <p class="muted">Sign in to access your account</p>
+      <div class="notice">Customer User ID = registered mobile number. Password is given by Admin when the loan is created.</div>
+      <form onsubmit="customerLogin(event)" class="form">
+        <div class="field full"><label>Mobile Number / User ID</label><input id="clogin" inputmode="numeric" maxlength="10" placeholder="10-digit mobile number" autocomplete="username" required></div>
+        <div class="field full"><label>Password</label><input id="cpass" type="password" placeholder="Customer password" autocomplete="current-password" required></div>
+        <div class="field full"><button class="btn login-btn customer-login-btn">Login as Customer →</button></div>
+      </form>
+      <div class="secure-login">🛡️ Secure Customer Access</div>
+    </section>
+  </div>
+</div>`;
 }
-function loginMode(mode){
-const el=document.getElementById("loginarea");
-if(mode==="admin") el.innerHTML=`<form onsubmit="adminLogin(event)" class="form">
-<div class="field full"><label>Admin Email</label><input id="ae" type="email" required></div>
-<div class="field full"><label>Password</label><input id="ap" type="password" required></div>
-<div class="field full"><button class="btn">Login</button></div></form>`;
-else el.innerHTML=`<div class="notice">Customer User ID = registered mobile number. Password is given by Admin when the loan is created.</div>
-<form onsubmit="customerLogin(event)" class="form">
-<div class="field full"><label>User ID / Mobile Number</label><input id="clogin" inputmode="numeric" maxlength="10" placeholder="10-digit mobile number" required></div>
-<div class="field full"><label>Password</label><input id="cpass" type="password" placeholder="Customer password" required></div>
-<div class="field full"><button class="btn">Customer Login</button></div></form>
-<div class="notice" style="margin-top:12px">New customer? Admin must create the customer and loan first.</div>`;
-}
+function loginMode(mode){ return; }
 
 async function adminLogin(e){e.preventDefault();try{const d=await api("/api/auth/admin-login",{method:"POST",body:{email:ae.value,password:ap.value}});setSession(d)}catch(e){alert(e.message)}}
 async function customerLogin(e){e.preventDefault();try{const d=await api("/api/auth/customer-login",{method:"POST",body:{login_id:clogin.value,password:cpass.value}});setSession(d)}catch(e){alert(e.message)}}
