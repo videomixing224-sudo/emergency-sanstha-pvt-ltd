@@ -98,6 +98,11 @@ CREATE TABLE IF NOT EXISTS users(
  created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
+ALTER TABLE users ADD COLUMN login_id TEXT;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_id
+ON users(login_id);
+
 CREATE TABLE IF NOT EXISTS otp_codes(
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  mobile TEXT NOT NULL,
@@ -241,6 +246,41 @@ function seedAdmin() {
 seedAdmin();
 
 /* -----------------------------
+   Backfill Customer Login IDs
+----------------------------- */
+
+db.prepare(`
+  SELECT id
+  FROM users
+  WHERE role IN ('customer','investor')
+    AND (login_id IS NULL OR login_id='')
+`).all().forEach((row) => {
+  const mobileUser = db.prepare(`
+    SELECT mobile
+    FROM users
+    WHERE id=?
+    LIMIT 1
+  `).get(row.id);
+
+  if (mobileUser?.mobile) {
+    const mobile = String(mobileUser.mobile)
+      .replace(/\\D/g, "")
+      .replace(/^91(?=\\d{10}$)/, "");
+
+    db.prepare(`
+      UPDATE users
+      SET login_id=?
+      WHERE id=?
+    `).run(
+      mobile,
+      row.id
+    );
+  }
+});
+
+
+
+/* -----------------------------
    Rate Limiter
 ----------------------------- */
 
@@ -334,6 +374,7 @@ function safeUser(id) {
   return db.prepare(`
     SELECT
       id,
+      login_id,
       role,
       name,
       father_husband,
@@ -348,41 +389,194 @@ function safeUser(id) {
   `).get(id);
 }
 
+
+/* -----------------------------
+   Customer Login Credentials
+----------------------------- */
+
+function customerLoginId(userId) {
+  const user = db.prepare(`
+    SELECT mobile
+    FROM users
+    WHERE id=?
+    LIMIT 1
+  `).get(userId);
+
+  if (!user || !user.mobile) {
+    throw new Error("Customer mobile number is required");
+  }
+
+  return String(user.mobile).replace(/\D/g, "").replace(/^91(?=\d{10}$)/, "");
+}
+
+function generateCustomerPassword() {
+  const alphabet =
+    "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+  let value = "";
+
+  for (let i = 0; i < 10; i++) {
+    value += alphabet[
+      crypto.randomInt(0, alphabet.length)
+    ];
+  }
+
+  return value;
+}
+
+function ensureCustomerCredentials(userId) {
+  const user = db.prepare(`
+    SELECT *
+    FROM users
+    WHERE id=?
+      AND role IN ('customer','investor')
+    LIMIT 1
+  `).get(userId);
+
+  if (!user) {
+    throw new Error("Customer not found");
+  }
+
+  const loginId =
+    user.login_id ||
+    customerLoginId(user.id);
+
+  let temporaryPassword = null;
+
+  if (!user.login_id) {
+    db.prepare(`
+      UPDATE users
+      SET login_id=?
+      WHERE id=?
+    `).run(
+      loginId,
+      user.id
+    );
+  }
+
+  if (!user.password_hash) {
+    temporaryPassword =
+      generateCustomerPassword();
+
+    db.prepare(`
+      UPDATE users
+      SET password_hash=?, status='active'
+      WHERE id=?
+    `).run(
+      bcrypt.hashSync(
+        temporaryPassword,
+        12
+      ),
+      user.id
+    );
+  }
+
+  return {
+    login_id: loginId,
+    temporary_password:
+      temporaryPassword
+  };
+}
+
 /* -----------------------------
    Admin Login
 ----------------------------- */
 
 app.post(
   "/api/auth/admin-login",
-  otpLimiter,
   (req, res) => {
-
     try {
+      const email = String(req.body?.email || "")
+        .trim()
+        .toLowerCase();
 
-      const email =
-        String(req.body.email || "")
-          .trim()
-          .toLowerCase();
+      const password = String(req.body?.password || "");
 
-      const password =
-        String(req.body.password || "");
+      if (!email || !password) {
+        return res.status(400).json({
+          error: "Email and password are required"
+        });
+      }
 
+      /*
+       * Primary admin credentials come from Railway Variables.
+       * This avoids a stale/mismatched database password preventing
+       * the configured administrator from logging in.
+       */
+      const configuredEmail = String(
+        process.env.ADMIN_EMAIL || ""
+      ).trim().toLowerCase();
+
+      const configuredPassword = String(
+        process.env.ADMIN_PASSWORD || ""
+      );
+
+      if (
+        configuredEmail &&
+        configuredPassword &&
+        email === configuredEmail &&
+        password === configuredPassword
+      ) {
+        const admin = db.prepare(`
+          SELECT *
+          FROM users
+          WHERE role='admin'
+          LIMIT 1
+        `).get();
+
+        if (!admin) {
+          return res.status(500).json({
+            error: "Admin account is not initialized"
+          });
+        }
+
+        // Make sure the returned account is active and matches
+        // the Railway-configured administrator.
+        if (
+          admin.email !== configuredEmail ||
+          admin.status !== "active"
+        ) {
+          db.prepare(`
+            UPDATE users
+            SET email=?, status='active'
+            WHERE id=?
+          `).run(
+            configuredEmail,
+            admin.id
+          );
+
+          admin.email = configuredEmail;
+          admin.status = "active";
+        }
+
+        return res.json({
+          token: sign({
+            ...admin,
+            role: "admin"
+          }),
+          user: safeUser(admin.id)
+        });
+      }
+
+      /*
+       * Backward-compatible database check.
+       */
       const user = db.prepare(`
         SELECT *
         FROM users
         WHERE LOWER(email)=?
-        AND role='admin'
+          AND role='admin'
+          AND status='active'
         LIMIT 1
       `).get(email);
 
       if (
         !user ||
+        !user.password_hash ||
         !bcrypt.compareSync(
           password,
-          user.password_hash || ""
+          user.password_hash
         )
       ) {
-
         return res.status(401).json({
           error: "Invalid admin credentials"
         });
@@ -394,7 +588,6 @@ app.post(
       });
 
     } catch (error) {
-
       console.error(
         "Admin login error:",
         error
@@ -409,15 +602,24 @@ app.post(
 
 /* -----------------------------
    Request REAL SMS OTP via 2Factor
-   SMS-only endpoint: manual OTP generation.
+   SMS channel is explicitly selected.
+----------------------------- */
+
+/* -----------------------------
+   Request REAL SMS OTP via 2Factor
+   SMS channel is explicitly selected.
 ----------------------------- */
 
 app.post(
   "/api/auth/request-otp",
   otpLimiter,
   async (req, res) => {
+
     try {
-      const mobile = String(req.body.mobile || "").replace(/\D/g, "");
+
+      const mobile =
+        String(req.body.mobile || "")
+          .replace(/\D/g, "");
 
       if (!/^[6-9]\d{9}$/.test(mobile)) {
         return res.status(400).json({
@@ -425,9 +627,10 @@ app.post(
         });
       }
 
-      // Generate the OTP locally so the same value is used for
-      // both the SMS and the verification step.
-      const code = String(crypto.randomInt(100000, 1000000));
+      const code = String(
+        crypto.randomInt(100000, 1000000)
+      );
+
       const hash = bcrypt.hashSync(code, 10);
 
       db.prepare(
@@ -444,6 +647,8 @@ app.post(
         Date.now() + 5 * 60 * 1000
       );
 
+      // 2Factor account/API key
+      // Keep the existing Railway variable name for compatibility.
       const apiKey =
         process.env.TWOFATOR_API_KEY ||
         process.env.TWOFACTOR_API_KEY;
@@ -453,7 +658,9 @@ app.post(
           "DELETE FROM otp_codes WHERE mobile=?"
         ).run(mobile);
 
-        console.error("2Factor API key is missing");
+        console.error(
+          "TWOFATOR_API_KEY / TWOFACTOR_API_KEY is missing"
+        );
 
         return res.status(500).json({
           error: "SMS service is not configured"
@@ -461,40 +668,62 @@ app.post(
       }
 
       /*
-       * SMS-ONLY:
-       * Use 2Factor's manual-generation SMS endpoint.
+       * SMS-ONLY mode
        *
-       * /API/V1/{api_key}/SMS/{phone_number}/{otp_value}/{template}
+       * Do NOT use 2Factor's OTP/SEND endpoint here because their
+       * OTP platform may use voice fallback. We send the already
+       * generated OTP through the Transactional SMS API instead.
        *
-       * This is the SMS-specific endpoint shown in the 2Factor
-       * "Send OTP - Custom OTP" documentation.
+       * Required Railway variables:
+       *   TWOFATOR_API_KEY   (or TWOFACTOR_API_KEY)
+       *   TSMS_TEMPLATE_NAME (approved Transactional SMS template)
+       *   TSMS_SENDER_ID    (approved sender/header, e.g. TFACTR)
+       *
+       * The template must contain a placeholder for VAR1.
        */
       const template =
-        process.env.OTP_TEMPLATE_NAME ||
         process.env.TSMS_TEMPLATE_NAME ||
         process.env.TRANSACTIONAL_TEMPLATE_NAME ||
-        "OTP1";
+        process.env.OTP_TEMPLATE_NAME ||
+        process.env.OTP_TEMPLATE;
 
-      const smsUrl =
+      const senderId =
+        process.env.TSMS_SENDER_ID ||
+        process.env.TRANSACTIONAL_SENDER_ID;
+
+      if (!template || !senderId) {
+        db.prepare(
+          "DELETE FROM otp_codes WHERE mobile=?"
+        ).run(mobile);
+
+        console.error(
+          "Transactional SMS configuration missing: TSMS_TEMPLATE_NAME and TSMS_SENDER_ID are required"
+        );
+
+        return res.status(500).json({
+          error:
+            "SMS template/sender is not configured"
+        });
+      }
+
+      const tsmsUrl =
         "https://2factor.in/API/V1/" +
         encodeURIComponent(apiKey) +
-        "/SMS/" +
-        encodeURIComponent("91" + mobile) +
-        "/" +
-        encodeURIComponent(code) +
-        "/" +
-        encodeURIComponent(template);
+        "/ADDON_SERVICES/SEND/TSMS";
 
-      console.log("Sending SMS-only OTP via 2Factor", {
-        mobile: "91" + mobile,
-        template
-      });
+      const form = new URLSearchParams();
+      form.set("From", senderId);
+      form.set("To", "91" + mobile);
+      form.set("TemplateName", template);
+      form.set("VAR1", code);
 
-      const smsResponse = await fetch(smsUrl, {
-        method: "GET",
+      const smsResponse = await fetch(tsmsUrl, {
+        method: "POST",
         headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
           "Accept": "application/json, text/plain, */*"
-        }
+        },
+        body: form.toString()
       });
 
       const rawText = await smsResponse.text();
@@ -503,16 +732,16 @@ app.post(
       try {
         smsData = JSON.parse(rawText);
       } catch (_) {
-        // Some legacy 2Factor responses may be plain text.
+        // Legacy 2Factor responses can be plain text.
       }
 
       const providerStatus = String(
         smsData?.Status ??
         smsData?.status ??
-        ""
+        rawText
       ).trim().toLowerCase();
 
-      console.log("2Factor SMS-only response:", {
+      console.log("2Factor Transactional SMS response:", {
         http_status: smsResponse.status,
         provider_status:
           smsData?.Status ?? smsData?.status ?? null,
@@ -536,8 +765,7 @@ app.post(
         ).run(mobile);
 
         return res.status(502).json({
-          error: "Unable to send SMS OTP",
-          provider_response: rawText
+          error: "Unable to send SMS OTP"
         });
       }
 
@@ -546,7 +774,8 @@ app.post(
       });
 
     } catch (error) {
-      console.error("2Factor SMS-only OTP error:", error);
+
+      console.error("2Factor SMS OTP error:", error);
 
       return res.status(500).json({
         error: "Failed to send SMS OTP"
@@ -655,6 +884,83 @@ app.post(
       token: sign(user),
       user: safeUser(user.id)
     });
+  }
+);
+
+/* -----------------------------
+   Customer Login with User ID + Password
+----------------------------- */
+
+app.post(
+  "/api/auth/customer-login",
+  (req, res) => {
+    try {
+      const loginId = String(
+        req.body?.mobile ||
+        req.body?.login_id ||
+        req.body?.user_id ||
+        ""
+      ).replace(/\\D/g, "")
+       .replace(/^91(?=\\d{10}$)/, "");
+
+      const password = String(
+        req.body?.password || ""
+      );
+
+      if (!loginId || !password) {
+        return res.status(400).json({
+          error:
+            "User ID and password are required"
+        });
+      }
+
+      const user = db.prepare(`
+        SELECT *
+        FROM users
+        WHERE (
+          login_id=?
+          OR REPLACE(REPLACE(REPLACE(mobile,'+',''),' ',''),'-','')=?
+          OR REPLACE(mobile,' ','')=?
+        )
+          AND role IN ('customer','investor')
+          AND status='active'
+        LIMIT 1
+      `).get(
+        loginId,
+        loginId,
+        "91" + loginId
+      );
+
+      if (
+        !user ||
+        !user.password_hash ||
+        !bcrypt.compareSync(
+          password,
+          user.password_hash
+        )
+      ) {
+        return res.status(401).json({
+          error:
+            "Invalid customer User ID or password"
+        });
+      }
+
+      return res.json({
+        token: sign(user),
+        user: safeUser(user.id)
+      });
+
+    } catch (error) {
+      console.error(
+        "Customer login error:",
+        error
+      );
+
+      return res.status(500).json({
+        error:
+          "Customer login failed"
+      });
+    }
   }
 );
 
@@ -1243,8 +1549,26 @@ app.post(
       status
     );
 
+    const credentials =
+      ensureCustomerCredentials(
+        Number(customer_id)
+      );
+
     return res.json({
-      loan_id
+      loan_id,
+      customer_id: Number(customer_id),
+      customer_user_id:
+        credentials.login_id,
+      temporary_password:
+        credentials.temporary_password,
+      password_generated:
+        Boolean(
+          credentials.temporary_password
+        ),
+      message:
+        credentials.temporary_password
+          ? "Loan created and customer login credentials generated"
+          : "Loan created; existing customer credentials kept"
     });
   }
 );
