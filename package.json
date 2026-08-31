@@ -7,6 +7,9 @@
     "start": "node server.js",
     "dev": "node --watch server.js"
   },
+  "engines": {
+    "node": "22.x"
+  },
   "dependencies": {
     "better-sqlite3": "^11.8.1",
     "bcryptjs": "^2.4.3",
