@@ -125,6 +125,18 @@ CREATE TABLE IF NOT EXISTS loans(
  FOREIGN KEY(customer_id) REFERENCES users(id)
 );
 
+CREATE TABLE IF NOT EXISTS loan_payments(
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ loan_id INTEGER NOT NULL,
+ customer_id INTEGER NOT NULL,
+ amount REAL NOT NULL,
+ payment_date TEXT NOT NULL,
+ note TEXT,
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+ FOREIGN KEY(loan_id) REFERENCES loans(id),
+ FOREIGN KEY(customer_id) REFERENCES users(id)
+);
+
 CREATE TABLE IF NOT EXISTS investments(
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  customer_id INTEGER NOT NULL,
@@ -1020,11 +1032,20 @@ app.get(
       ORDER BY id DESC
     `).all(req.user.id);
 
+    const payments = db.prepare(`
+      SELECT loan_payments.*, loans.loan_id AS loan_code
+      FROM loan_payments
+      JOIN loans ON loans.id=loan_payments.loan_id
+      WHERE loan_payments.customer_id=?
+      ORDER BY loan_payments.id DESC
+    `).all(req.user.id);
+
     return res.json({
       user,
       loans,
       investments,
-      requests
+      requests,
+      payments
     });
   }
 );
@@ -1566,7 +1587,8 @@ app.get(
         SELECT
           loans.*,
           users.name customer_name,
-          users.mobile
+          users.mobile,
+          COALESCE((SELECT SUM(amount) FROM loan_payments WHERE loan_payments.loan_id=loans.id), 0) AS total_paid
         FROM loans
         JOIN users
           ON users.id=loans.customer_id
@@ -1821,9 +1843,86 @@ app.delete("/api/admin/loans/:id", auth, roles("admin"), (req, res) => {
   }
 
   db.prepare("DELETE FROM closure_requests WHERE loan_id=?").run(loan.loan_id);
+  db.prepare("DELETE FROM loan_payments WHERE loan_id=?").run(loan.id);
   db.prepare("DELETE FROM loans WHERE id=?").run(req.params.id);
 
   return res.json({ message: "Cleared loan deleted successfully" });
+});
+
+/* -----------------------------
+   Admin Loan Payments / Collections
+----------------------------- */
+app.get("/api/admin/payments", auth, roles("admin"), (req, res) => {
+  return res.json(db.prepare(`
+    SELECT loan_payments.*, loans.loan_id AS loan_code,
+           users.name AS customer_name, users.mobile
+    FROM loan_payments
+    JOIN loans ON loans.id=loan_payments.loan_id
+    JOIN users ON users.id=loan_payments.customer_id
+    ORDER BY loan_payments.id DESC
+  `).all());
+});
+
+app.post("/api/admin/loans/:id/payments", auth, roles("admin"), (req, res) => {
+  const loan = db.prepare(`
+    SELECT id, loan_id, customer_id, outstanding, status
+    FROM loans WHERE id=? LIMIT 1
+  `).get(req.params.id);
+
+  if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+  const amount = Number(req.body.amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return res.status(400).json({ error: "Valid payment amount is required" });
+  }
+
+  const currentOutstanding = Math.max(0, Number(loan.outstanding || 0));
+  if (amount > currentOutstanding) {
+    return res.status(400).json({
+      error: `Payment cannot exceed outstanding amount ${currentOutstanding}`
+    });
+  }
+
+  const paymentDate = String(req.body.payment_date || new Date().toISOString().slice(0, 10));
+  const note = String(req.body.note || "").trim();
+
+  const tx = db.transaction(() => {
+    db.prepare(`
+      INSERT INTO loan_payments (loan_id, customer_id, amount, payment_date, note)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(loan.id, loan.customer_id, amount, paymentDate, note);
+
+    const newOutstanding = Math.max(0, currentOutstanding - amount);
+    const newStatus = newOutstanding <= 0 ? "cleared" : (loan.status === "cleared" ? "active" : loan.status);
+
+    db.prepare(`
+      UPDATE loans SET outstanding=?, status=? WHERE id=?
+    `).run(newOutstanding, newStatus, loan.id);
+
+    return { newOutstanding, newStatus };
+  });
+
+  const result = tx();
+  return res.json({
+    message: result.newOutstanding <= 0
+      ? "Payment saved. Loan is now cleared."
+      : "Payment saved successfully.",
+    loan_id: loan.loan_id,
+    amount,
+    outstanding: result.newOutstanding
+  });
+});
+
+app.get("/api/admin/loans/:id/payments", auth, roles("admin"), (req, res) => {
+  const loan = db.prepare("SELECT id FROM loans WHERE id=? LIMIT 1").get(req.params.id);
+  if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+  return res.json(db.prepare(`
+    SELECT id, loan_id, amount, payment_date, note, created_at
+    FROM loan_payments
+    WHERE loan_id=?
+    ORDER BY id DESC
+  `).all(loan.id));
 });
 
 /* -----------------------------

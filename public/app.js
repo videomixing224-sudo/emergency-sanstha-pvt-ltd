@@ -52,7 +52,7 @@ function nav(label,fn,active=""){return `<button class="${active}" onclick="${fn
 
 async function renderAdmin(){
 shell("Admin Dashboard",[
-nav("📊 Dashboard","adminDash()","active"),nav("👥 Customers","adminCustomers()"),nav("💰 Loan Management","adminLoans()"),nav("📈 Investment Management","adminInvestments()"),nav("📞 Service Requests","adminRequests()"),nav("🏦 Account Mandates","adminMandates()"),nav("🔒 Loan Closure","adminClosures()"),nav("📄 Documents","adminDocs()")
+nav("📊 Dashboard","adminDash()","active"),nav("👥 Customers","adminCustomers()"),nav("💰 Loan Management","adminLoans()"),nav("💵 Payment Collection","adminPayments()"),nav("📈 Investment Management","adminInvestments()"),nav("📞 Service Requests","adminRequests()"),nav("🏦 Account Mandates","adminMandates()"),nav("🔒 Loan Closure","adminClosures()"),nav("📄 Documents","adminDocs()")
 ].join(""),`<p class="muted">Loading...</p>`);adminDash();
 }
 async function adminDash(){
@@ -76,7 +76,7 @@ async function saveCustomer(e,id){e.preventDefault();try{const body={name:cn.val
 
 async function adminLoans(){
 const rows=await api("/api/admin/loans");document.getElementById("content").innerHTML=`<div class="title"><h1>Loan Management</h1><div class="row"><button class="btn" onclick="openLoanForm()">+ New Loan</button><button class="btn secondary" onclick="location.href='/api/admin/export/loans'">Export CSV</button></div></div>
-<div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Customer</th><th>Product</th><th>Principal</th><th>Outstanding</th><th>Interest</th><th>EMI</th><th>Duration</th><th>Payment</th><th>DPD</th><th>Status</th><th>Action</th></tr>${rows.map(r=>`<tr><td>${r.loan_id}</td><td>${esc(r.customer_name)}<br><small>${r.mobile}</small></td><td>${esc(r.product)}</td><td>${money(r.principal)}</td><td>${money(r.outstanding)}</td><td>${r.interest_rate}%</td><td>${money(r.emi)}</td><td>${r.duration_days||0} days</td><td>${r.payment_frequency||"monthly"}</td><td>${r.dpd}</td><td>${r.status}</td><td><button class="btn secondary" onclick="markLoanClear(${r.id})">Clear</button> <button class="btn secondary" onclick="deleteLoan(${r.id},${JSON.stringify(r.status)})">Delete</button></td></tr>`).join("")}</table></div>`;
+<div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Customer</th><th>Product</th><th>Principal</th><th>Outstanding</th><th>Paid</th><th>Interest</th><th>EMI</th><th>Duration</th><th>Payment</th><th>DPD</th><th>Status</th><th>Action</th></tr>${rows.map(r=>`<tr><td>${r.loan_id}</td><td>${esc(r.customer_name)}<br><small>${r.mobile}</small></td><td>${esc(r.product)}</td><td>${money(r.principal)}</td><td>${money(r.outstanding)}</td><td>${money(r.total_paid)}</td><td>${r.interest_rate}%</td><td>${money(r.emi)}</td><td>${r.duration_days||0} days</td><td>${r.payment_frequency||"monthly"}</td><td>${r.dpd}</td><td>${r.status}</td><td><button class="btn" onclick="openPaymentForm(${r.id})">Add Payment</button> <button class="btn secondary" onclick="markLoanClear(${r.id})">Clear</button> <button class="btn secondary" onclick="deleteLoan(${r.id},${JSON.stringify(r.status)})">Delete</button></td></tr>`).join("")}</table></div>`;
 }
 async function markLoanClear(id){try{await api(`/api/admin/loans/${id}/clear`,{method:"POST"});adminLoans()}catch(e){alert(e.message)}}
 async function deleteLoan(id,status){if(!["cleared","closed"].includes(String(status).toLowerCase())){alert("Pehle loan ko Clear karein. Sirf cleared/closed loan delete ho sakta hai.");return}if(!confirm("Kya aap is cleared loan ko permanently delete karna chahte hain?"))return;try{await api(`/api/admin/loans/${id}`,{method:"DELETE"});adminLoans()}catch(e){alert(e.message)}}
@@ -93,6 +93,34 @@ const customers=await api("/api/admin/customers");showModal(`<h2>Create Loan</h2
 }
 async function saveLoan(e){e.preventDefault();try{const result=await api("/api/admin/loans",{method:"POST",body:{customer_id:lc.value,product:lp.value,principal:lpr.value,outstanding:lo.value,interest_rate:li.value,emi:le.value,dpd:ld.value,start_date:ls.value,duration_days:ldays.value,payment_frequency:lf.value,password:lpw.value}});closeModal();adminLoans();alert(result.message+(result.temporary_password?`\\n\\nUser ID: ${result.customer_user_id}\\nPassword: ${result.temporary_password}`:""))}catch(e){alert(e.message)}}
 
+async function openPaymentForm(loanId){
+  const loans=await api("/api/admin/loans");
+  const loan=loans.find(x=>Number(x.id)===Number(loanId));
+  if(!loan){alert("Loan not found");return}
+  showModal(`<h2>Add Loan Payment</h2>
+  <div class="notice">Loan ID: <b>${esc(loan.loan_id)}</b><br>Customer: <b>${esc(loan.customer_name)}</b><br>Current Outstanding: <b>${money(loan.outstanding)}</b></div>
+  <form onsubmit="savePayment(event,${loan.id})" class="form">
+    <div class="field"><label>Payment Amount</label><input id="pamt" type="number" min="0.01" max="${Number(loan.outstanding)||0}" step="0.01" required></div>
+    <div class="field"><label>Payment Date</label><input id="pdate" type="date" value="${new Date().toISOString().slice(0,10)}" required></div>
+    <div class="field full"><label>Note</label><input id="pnote" placeholder="Cash / UPI / Bank / other"></div>
+    <div class="field full"><button class="btn">Save Payment</button></div>
+  </form>`);
+}
+async function savePayment(e,loanId){
+  e.preventDefault();
+  try{
+    const result=await api(`/api/admin/loans/${loanId}/payments`,{method:"POST",body:{amount:pamt.value,payment_date:pdate.value,note:pnote.value}});
+    closeModal(); adminLoans();
+    alert(`${result.message}\nLoan ID: ${result.loan_id}\nJama: ${money(result.amount)}\nBaki: ${money(result.outstanding)}`);
+  }catch(e){alert(e.message)}
+}
+async function adminPayments(){
+  const rows=await api("/api/admin/payments");
+  document.getElementById("content").innerHTML=`<div class="title"><h1>Payment Collection</h1></div>
+  <div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Customer</th><th>Amount Jama</th><th>Date</th><th>Note</th></tr>
+  ${rows.map(r=>`<tr><td><b>${esc(r.loan_code)}</b></td><td>${esc(r.customer_name)}<br><small>${esc(r.mobile||"")}</small></td><td>${money(r.amount)}</td><td>${esc(r.payment_date)}</td><td>${esc(r.note||"")}</td></tr>`).join("")||"<tr><td colspan=5>No payments found</td></tr>"}
+  </table></div>`;
+}
 async function adminInvestments(){
 const rows=await api("/api/admin/investments");document.getElementById("content").innerHTML=`<div class="title"><h1>Investment Management</h1><div class="row"><button class="btn" onclick="openInvestmentForm()">+ Add Investment</button><button class="btn secondary" onclick="location.href='/api/admin/export/investments'">Export CSV</button></div></div>
 <div class="table-wrap"><table class="table"><tr><th>Investment ID</th><th>Customer</th><th>Mobile</th><th>Amount</th><th>Date</th><th>Relation</th><th>Status</th></tr>${rows.map(r=>`<tr><td>${r.investment_id}</td><td>${esc(r.customer_name)}</td><td>${r.mobile}</td><td>${money(r.amount)}</td><td>${r.investment_date}</td><td>${esc(r.relation_name)}</td><td>${r.status}</td></tr>`).join("")}</table></div>`;
@@ -133,7 +161,18 @@ const d=await api("/api/customer/dashboard");document.getElementById("content").
 <div class="card" style="margin-top:18px"><h2>Customer Details</h2><p><b>Customer Name:</b> ${esc(d.user.name)}</p><p><b>Father/Husband:</b> ${esc(d.user.father_husband)}</p><p><b>Registered Mobile:</b> ${esc(d.user.mobile)}</p><p><b>Address:</b> ${esc(d.user.address)}</p><p><b>Language:</b> ${esc(d.user.language)}</p></div>`;
 }
 async function custLoans(){
-const d=await api("/api/customer/dashboard");document.getElementById("content").innerHTML=`<div class="title"><h1>My Loan</h1></div><div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Product</th><th>Loan Amount</th><th>Outstanding</th><th>Interest</th><th>EMI</th><th>Duration</th><th>Payment</th><th>DPD</th><th>Status</th></tr>${d.loans.map(r=>`<tr><td>${r.loan_id}</td><td>${esc(r.product)}</td><td>${money(r.principal)}</td><td>${money(r.outstanding)}</td><td>${r.interest_rate}%</td><td>${money(r.emi)}</td><td>${r.duration_days||0} days</td><td>${r.payment_frequency||"monthly"}</td><td>${r.dpd}</td><td>${r.status}</td></tr>`).join("")||"<tr><td colspan=8>No loan found</td></tr>"}</table></div>`;
+const d=await api("/api/customer/dashboard");
+const payments=d.payments||[];
+document.getElementById("content").innerHTML=`<div class="title"><h1>My Loan & Payments</h1></div>
+<div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Product</th><th>Loan Amount</th><th>Total Jama</th><th>Outstanding</th><th>Interest</th><th>EMI</th><th>Duration</th><th>Payment</th><th>Status</th></tr>
+${d.loans.map(r=>{
+ const paid=payments.filter(p=>Number(p.loan_id)===Number(r.id)).reduce((sum,p)=>sum+Number(p.amount||0),0);
+ return `<tr><td>${esc(r.loan_id)}</td><td>${esc(r.product)}</td><td>${money(r.principal)}</td><td>${money(paid)}</td><td>${money(r.outstanding)}</td><td>${r.interest_rate}%</td><td>${money(r.emi)}</td><td>${r.duration_days||0} days</td><td>${r.payment_frequency||"monthly"}</td><td>${r.status}</td></tr>`;
+}).join("")||"<tr><td colspan=10>No loan found</td></tr>"}</table></div>
+<div class="card" style="margin-top:16px"><h2>Payment History</h2>
+<div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Jama Amount</th><th>Date</th><th>Note</th></tr>
+${payments.map(p=>`<tr><td><b>${esc(p.loan_code)}</b></td><td>${money(p.amount)}</td><td>${esc(p.payment_date)}</td><td>${esc(p.note||"")}</td></tr>`).join("")||"<tr><td colspan=4>No payment recorded</td></tr>"}
+</table></div></div>`;
 }
 function custInsurance(){document.getElementById("content").innerHTML=`<div class="card"><h1>Insurance</h1><div class="notice">Insurance is currently <b>Not Available</b>.</div></div>`}
 function custRequest(){document.getElementById("content").innerHTML=`<div class="card"><h1>Service Request</h1><p class="muted">Support: 06479451097</p><form onsubmit="sendRequest(event)" class="form"><div class="field"><label>Subject</label><input id="rs" required></div><div class="field"><label>Message</label><textarea id="rm" required></textarea></div><div class="field full"><button class="btn">Submit Request</button></div></form></div>`}
