@@ -74,7 +74,15 @@ const d=await api("/api/admin/stats"); document.getElementById("content").innerH
 }
 async function adminCustomers(){
 const rows=await api("/api/admin/customers");document.getElementById("content").innerHTML=`<div class="title"><h1>Customers</h1><div class="row"><button class="btn" onclick="openCustomerForm()">+ Add Customer</button><button class="btn secondary" onclick="location.href='/api/admin/export/customers'">Export CSV</button></div></div>
-<div class="table-wrap"><table class="table"><tr><th>Name</th><th>Type</th><th>User ID</th><th>Mobile</th><th>Father/Husband</th><th>Language</th><th>Status</th><th>Action</th></tr>${rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${r.role}</td><td>${esc(r.login_id||r.mobile)}</td><td>${esc(r.mobile)}</td><td>${esc(r.father_husband)}</td><td>${esc(r.language)}</td><td>${r.status}</td><td><button class="btn secondary" onclick='openCustomerForm(${JSON.stringify(r)})'>Edit</button></td></tr>`).join("")}</table></div>`;
+<div class="table-wrap"><table class="table"><tr><th>Name</th><th>Type</th><th>User ID</th><th>Mobile</th><th>Father/Husband</th><th>Language</th><th>Status</th><th>Action</th></tr>${rows.map(r=>`<tr><td>${esc(r.name)}</td><td>${r.role}</td><td>${esc(r.login_id||r.mobile)}</td><td>${esc(r.mobile)}</td><td>${esc(r.father_husband)}</td><td>${esc(r.language)}</td><td>${r.status}</td><td><button class="btn secondary" onclick='openCustomerForm(${JSON.stringify(r)})'>Edit</button> <button class="btn secondary danger-btn" onclick='deleteCustomer(${r.id},${JSON.stringify(r.name)})'>Delete</button></td></tr>`).join("")}</table></div>`;
+}
+async function deleteCustomer(id,name){
+  if(!confirm(`Kya aap customer "${name}" ko delete karna chahte hain?\n\nSirf wahi customer delete hoga jiska loan cleared/closed hai ya outstanding 0 hai.`)) return;
+  try{
+    const result=await api(`/api/admin/customers/${id}`,{method:"DELETE"});
+    alert(result.message||"Customer deleted successfully");
+    adminCustomers();
+  }catch(e){alert(e.message)}
 }
 function openCustomerForm(r=null){
 const x=r||{};showModal(`<h2>${r?"Edit":"Add"} Customer</h2><form onsubmit="saveCustomer(event,${r?x.id:"null"})" class="form">

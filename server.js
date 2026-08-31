@@ -1561,6 +1561,8 @@ app.delete("/api/admin/customers/:id", auth, roles("admin"), (req, res) => {
     db.prepare("DELETE FROM mandates WHERE customer_id=?").run(userId);
     db.prepare("DELETE FROM documents WHERE customer_id=?").run(userId);
     db.prepare("DELETE FROM investments WHERE customer_id=?").run(userId);
+    // Payment rows reference loans, so remove them before deleting cleared loans.
+    db.prepare("DELETE FROM loan_payments WHERE customer_id=?").run(userId);
     db.prepare("DELETE FROM loans WHERE customer_id=?").run(userId);
     db.prepare("DELETE FROM users WHERE id=?").run(userId);
   });
