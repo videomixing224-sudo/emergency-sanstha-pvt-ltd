@@ -469,34 +469,63 @@ app.post(
         });
       }
 
-      const template =
-        process.env.OTP_TEMPLATE_NAME ||
-        process.env.OTP_TEMPLATE ||
-        "LOGIN_OTP";
-
       /*
-       * 2Factor Custom OTP SMS API.
-       * The documented endpoint uses GET with the API key,
-       * mobile number, OTP value and OTP template in the path:
-       * /API/V1/{api_key}/SMS/{phone_number}/{otp_value}/{template}
+       * SMS-ONLY mode
        *
-       * We deliberately use the SMS endpoint here, not Voice OTP.
+       * Do NOT use 2Factor's OTP/SEND endpoint here because their
+       * OTP platform may use voice fallback. We send the already
+       * generated OTP through the Transactional SMS API instead.
+       *
+       * Required Railway variables:
+       *   TWOFATOR_API_KEY   (or TWOFACTOR_API_KEY)
+       *   TSMS_TEMPLATE_NAME (approved Transactional SMS template)
+       *   TSMS_SENDER_ID    (approved sender/header, e.g. TFACTR)
+       *
+       * The template must contain a placeholder for VAR1.
        */
-      const apiUrl =
+      const template =
+        process.env.TSMS_TEMPLATE_NAME ||
+        process.env.TRANSACTIONAL_TEMPLATE_NAME ||
+        process.env.OTP_TEMPLATE_NAME ||
+        process.env.OTP_TEMPLATE;
+
+      const senderId =
+        process.env.TSMS_SENDER_ID ||
+        process.env.TRANSACTIONAL_SENDER_ID;
+
+      if (!template || !senderId) {
+        db.prepare(
+          "DELETE FROM otp_codes WHERE mobile=?"
+        ).run(mobile);
+
+        console.error(
+          "Transactional SMS configuration missing: TSMS_TEMPLATE_NAME and TSMS_SENDER_ID are required"
+        );
+
+        return res.status(500).json({
+          error:
+            "SMS template/sender is not configured"
+        });
+      }
+
+      const tsmsUrl =
         "https://2factor.in/API/V1/" +
         encodeURIComponent(apiKey) +
-        "/SMS/" +
-        encodeURIComponent("+91" + mobile) +
-        "/" +
-        encodeURIComponent(code) +
-        "/" +
-        encodeURIComponent(template);
+        "/ADDON_SERVICES/SEND/TSMS";
 
-      const smsResponse = await fetch(apiUrl, {
-        method: "GET",
+      const form = new URLSearchParams();
+      form.set("From", senderId);
+      form.set("To", "91" + mobile);
+      form.set("TemplateName", template);
+      form.set("VAR1", code);
+
+      const smsResponse = await fetch(tsmsUrl, {
+        method: "POST",
         headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
           "Accept": "application/json, text/plain, */*"
-        }
+        },
+        body: form.toString()
       });
 
       const rawText = await smsResponse.text();
@@ -505,18 +534,16 @@ app.post(
       try {
         smsData = JSON.parse(rawText);
       } catch (_) {
-        // Some 2Factor responses may be plain text.
+        // Legacy 2Factor responses can be plain text.
       }
 
       const providerStatus = String(
         smsData?.Status ??
         smsData?.status ??
-        smsData?.Details ??
-        smsData?.details ??
         rawText
       ).trim().toLowerCase();
 
-      console.log("2Factor SMS OTP response:", {
+      console.log("2Factor Transactional SMS response:", {
         http_status: smsResponse.status,
         provider_status:
           smsData?.Status ?? smsData?.status ?? null,
