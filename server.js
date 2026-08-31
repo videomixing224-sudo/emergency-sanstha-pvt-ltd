@@ -98,7 +98,13 @@ CREATE TABLE IF NOT EXISTS users(
  created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
-ALTER TABLE users ADD COLUMN login_id TEXT;
+/* Idempotent schema migration: add login_id only when missing. */
+const userColumns = db.prepare("PRAGMA table_info(users)").all();
+const hasLoginId = userColumns.some((column) => column.name === "login_id");
+
+if (!hasLoginId) {
+  db.exec("ALTER TABLE users ADD COLUMN login_id TEXT");
+}
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_users_login_id
 ON users(login_id);
@@ -264,8 +270,8 @@ db.prepare(`
 
   if (mobileUser?.mobile) {
     const mobile = String(mobileUser.mobile)
-      .replace(/\\D/g, "")
-      .replace(/^91(?=\\d{10}$)/, "");
+      .replace(/\D/g, "")
+      .replace(/^91(?=\d{10}$)/, "");
 
     db.prepare(`
       UPDATE users
@@ -394,6 +400,12 @@ function safeUser(id) {
    Customer Login Credentials
 ----------------------------- */
 
+function normalizeMobile(value) {
+  return String(value || "")
+    .replace(/\D/g, "")
+    .replace(/^91(?=\d{10}$)/, "");
+}
+
 function customerLoginId(userId) {
   const user = db.prepare(`
     SELECT mobile
@@ -402,11 +414,13 @@ function customerLoginId(userId) {
     LIMIT 1
   `).get(userId);
 
-  if (!user || !user.mobile) {
-    throw new Error("Customer mobile number is required");
+  const mobile = normalizeMobile(user?.mobile);
+
+  if (!mobile || mobile.length !== 10) {
+    throw new Error("Customer mobile number must be a valid 10-digit number");
   }
 
-  return String(user.mobile).replace(/\D/g, "").replace(/^91(?=\d{10}$)/, "");
+  return mobile;
 }
 
 function generateCustomerPassword() {
@@ -888,8 +902,8 @@ app.post(
         req.body?.login_id ||
         req.body?.user_id ||
         ""
-      ).replace(/\\D/g, "")
-       .replace(/^91(?=\\d{10}$)/, "");
+      ).replace(/\D/g, "")
+       .replace(/^91(?=\d{10}$)/, "");
 
       const password = String(
         req.body?.password || ""
@@ -1340,11 +1354,17 @@ app.post(
       language = "Hindi"
     } = req.body;
 
-    if (!name || !mobile) {
+    const normalizedMobile = normalizeMobile(mobile);
 
+    if (!name || !normalizedMobile) {
       return res.status(400).json({
-        error:
-          "Name and mobile are required"
+        error: "Name and mobile are required"
+      });
+    }
+
+    if (normalizedMobile.length !== 10) {
+      return res.status(400).json({
+        error: "Mobile number must be a valid 10-digit number"
       });
     }
 
@@ -1362,16 +1382,18 @@ app.post(
           name,
           father_husband,
           mobile,
+          login_id,
           email,
           address,
           language
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         finalRole,
         name,
         father_husband || "",
-        mobile,
+        normalizedMobile,
+        normalizedMobile,
         email || "",
         address || "",
         language
@@ -1418,12 +1440,21 @@ app.put(
       role
     } = req.body;
 
+    const normalizedMobile = normalizeMobile(mobile);
+
+    if (!normalizedMobile || normalizedMobile.length !== 10) {
+      return res.status(400).json({
+        error: "Mobile number must be a valid 10-digit number"
+      });
+    }
+
     db.prepare(`
       UPDATE users
       SET
         name=?,
         father_husband=?,
         mobile=?,
+        login_id=?,
         email=?,
         address=?,
         language=?,
@@ -1433,7 +1464,8 @@ app.put(
     `).run(
       name || "Customer",
       father_husband || "",
-      mobile || "",
+      normalizedMobile,
+      normalizedMobile,
       email || "",
       address || "",
       language || "Hindi",
@@ -1503,6 +1535,26 @@ app.post(
       return res.status(400).json({
         error:
           "Customer and product are required"
+      });
+    }
+
+    const customer = db.prepare(`
+      SELECT id, name, mobile, role, status
+      FROM users
+      WHERE id=?
+        AND role IN ('customer','investor')
+      LIMIT 1
+    `).get(Number(customer_id));
+
+    if (!customer) {
+      return res.status(404).json({
+        error: "Customer not found"
+      });
+    }
+
+    if (customer.status !== "active") {
+      return res.status(400).json({
+        error: "Customer account is not active"
       });
     }
 
