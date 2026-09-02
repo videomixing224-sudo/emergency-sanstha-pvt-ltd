@@ -155,16 +155,85 @@ async function adminPayments(){
   </table></div>`;
 }
 async function adminInvestments(){
-const rows=await api("/api/admin/investments");document.getElementById("content").innerHTML=`<div class="title"><h1>Investment Management</h1><div class="row"><button class="btn" onclick="openInvestmentForm()">+ Add Investment</button><button class="btn secondary" onclick="location.href='/api/admin/export/investments'">Export CSV</button></div></div>
-<div class="table-wrap"><table class="table"><tr><th>Investment ID</th><th>Customer</th><th>Mobile</th><th>Amount</th><th>Date</th><th>Relation</th><th>Status</th></tr>${rows.map(r=>`<tr><td>${r.investment_id}</td><td>${esc(r.customer_name)}</td><td>${r.mobile}</td><td>${money(r.amount)}</td><td>${r.investment_date}</td><td>${esc(r.relation_name)}</td><td>${r.status}</td></tr>`).join("")}</table></div>`;
+const [rows,txns]=await Promise.all([
+  api("/api/admin/investments"),
+  api("/api/admin/investment-transactions")
+]);
+document.getElementById("content").innerHTML=`<div class="title"><h1>Investment Management</h1>
+<div class="row">
+<button class="btn" onclick="openInvestmentForm()">+ New Investment</button>
+<button class="btn" onclick="openInvestmentTransactionForm('deposit')">💰 Deposit</button>
+<button class="btn danger" onclick="openInvestmentTransactionForm('withdrawal')">↘️ निकासी</button>
+<button class="btn secondary" onclick="location.href='/api/admin/export/investments'">Export CSV</button>
+</div></div>
+
+<div class="grid">
+<div class="card">Total Investments<div class="stat">${money(rows.reduce((x,r)=>x+Number(r.amount||0),0))}</div></div>
+<div class="card">Total Deposits<div class="stat">${money(rows.reduce((x,r)=>x+Number(r.deposit_total||0),0))}</div></div>
+<div class="card">Total निकासी<div class="stat">${money(rows.reduce((x,r)=>x+Number(r.withdrawal_total||0),0))}</div></div>
+<div class="card">Current Balance<div class="stat">${money(rows.reduce((x,r)=>x+Number(r.balance||0),0))}</div></div>
+</div>
+
+<div class="card" style="margin-top:18px"><h2>Investment Accounts</h2>
+<div class="table-wrap"><table class="table"><tr>
+<th>Investment ID</th><th>Customer</th><th>Mobile</th><th>New Investment</th><th>Deposit</th><th>निकासी</th><th>Balance</th><th>Date</th><th>Relation</th><th>Status</th>
+</tr>${rows.map(r=>`<tr>
+<td><b>${esc(r.investment_id)}</b></td><td>${esc(r.customer_name)}</td><td>${esc(r.mobile||"")}</td>
+<td>${money(r.amount)}</td><td>${money(r.deposit_total)}</td><td>${money(r.withdrawal_total)}</td><td><b>${money(r.balance)}</b></td>
+<td>${esc(r.investment_date)}</td><td>${esc(r.relation_name||"")}</td><td>${esc(r.status)}</td>
+</tr>`).join("")||"<tr><td colspan=10>No investment found</td></tr>"}</table></div></div>
+
+<div class="card" style="margin-top:18px"><h2>Deposit / निकासी History</h2>
+<div class="table-wrap"><table class="table"><tr><th>Investment ID</th><th>Customer</th><th>Type</th><th>Amount</th><th>Date</th><th>Note</th></tr>
+${txns.map(r=>`<tr><td>${esc(r.investment_code)}</td><td>${esc(r.customer_name)}<br><small>${esc(r.mobile||"")}</small></td>
+<td><span class="badge">${r.type==="deposit"?"Deposit":"निकासी"}</span></td><td>${money(r.amount)}</td><td>${esc(r.transaction_date)}</td><td>${esc(r.note||"")}</td></tr>`).join("")||"<tr><td colspan=6>No transactions found</td></tr>"}
+</table></div></div>`;
 }
+
 async function openInvestmentForm(){
-const customers=await api("/api/admin/customers");showModal(`<h2>Customer Invest Plan</h2><form onsubmit="saveInvestment(event)" class="form">
-<div class="field full"><label>Investor Customer</label><select id="ic">${customers.filter(c=>c.role==="investor").map(c=>`<option value="${c.id}">${esc(c.name)} - ${c.mobile}</option>`).join("")}</select></div>
-<div class="field"><label>जमा राशि</label><input id="ia" type="number" required></div><div class="field"><label>निवेश की तिथि</label><input id="idate" type="date" required></div>
-<div class="field full"><label>रिश्ते का नाम</label><input id="ir"></div><div class="field full"><button class="btn">Save Investment</button></div></form>`);
+const customers=await api("/api/admin/customers");
+showModal(`<h2>New Investment</h2><form onsubmit="saveInvestment(event)" class="form">
+<div class="field full"><label>Investor Customer</label><select id="ic" required>
+${customers.filter(c=>c.role==="investor").map(c=>`<option value="${c.id}">${esc(c.name)} - ${esc(c.mobile||"")}</option>`).join("")}
+</select></div>
+<div class="field"><label>निवेश राशि</label><input id="ia" type="number" min="1" step="0.01" required></div>
+<div class="field"><label>निवेश की तिथि</label><input id="idate" type="date" required></div>
+<div class="field full"><label>रिश्ते का नाम</label><input id="ir"></div>
+<div class="field full"><button class="btn">Save New Investment</button></div></form>`);
 }
-async function saveInvestment(e){e.preventDefault();try{await api("/api/admin/investments",{method:"POST",body:{customer_id:ic.value,amount:ia.value,investment_date:idate.value,relation_name:ir.value}});closeModal();adminInvestments()}catch(e){alert(e.message)}}
+
+async function openInvestmentTransactionForm(type){
+const rows=await api("/api/admin/investments");
+const label=type==="deposit"?"Deposit / जमा":"निकासी / Withdrawal";
+showModal(`<h2>${label}</h2><form onsubmit="saveInvestmentTransaction(event,'${type}')" class="form">
+<div class="field full"><label>Investment Account</label><select id="ti" required>
+${rows.filter(r=>r.status==="active").map(r=>`<option value="${r.id}">${esc(r.investment_id)} — ${esc(r.customer_name)} — Balance ${money(r.balance)}</option>`).join("")}
+</select></div>
+<div class="field"><label>${type==="deposit"?"जमा राशि":"निकासी राशि"}</label><input id="ta" type="number" min="1" step="0.01" required></div>
+<div class="field"><label>तारीख</label><input id="tdate" type="date" required></div>
+<div class="field full"><label>नोट</label><textarea id="tnote" rows="3" placeholder="Transaction note"></textarea></div>
+<div class="field full"><button class="btn ${type==="withdrawal"?"danger":""}">${label} Save</button></div></form>`);
+}
+
+async function saveInvestment(e){
+e.preventDefault();
+try{
+const result=await api("/api/admin/investments",{method:"POST",body:{
+customer_id:ic.value,amount:ia.value,investment_date:idate.value,relation_name:ir.value
+}});
+closeModal();adminInvestments();alert(`${result.message}\nInvestment ID: ${result.investment_id}`);
+}catch(e){alert(e.message)}
+}
+
+async function saveInvestmentTransaction(e,type){
+e.preventDefault();
+try{
+const result=await api("/api/admin/investment-transactions",{method:"POST",body:{
+investment_id:ti.value,type,amount:ta.value,transaction_date:tdate.value,note:tnote.value
+}});
+closeModal();adminInvestments();alert(`${result.message}\nCurrent Balance: ${money(result.balance)}`);
+}catch(e){alert(e.message)}
+}
 
 async function adminRequests(){
 const rows=await api("/api/admin/requests");document.getElementById("content").innerHTML=`<div class="title"><h1>Service Requests</h1></div><div class="table-wrap"><table class="table"><tr><th>ID</th><th>Customer</th><th>Subject</th><th>Message</th><th>Status</th><th>Update</th></tr>${rows.map(r=>`<tr><td>${r.id}</td><td>${esc(r.customer_name)}<br>${r.mobile}</td><td>${esc(r.subject)}</td><td>${esc(r.message)}</td><td>${r.status}</td><td><select onchange="updateRequest(${r.id},this.value)"><option ${r.status==="open"?"selected":""}>open</option><option ${r.status==="in_progress"?"selected":""}>in_progress</option><option ${r.status==="closed"?"selected":""}>closed</option></select></td></tr>`).join("")}</table></div>`;
@@ -261,7 +330,7 @@ const rows=await api("/api/customer/documents");document.getElementById("content
 }
 async function uploadDoc(e){e.preventDefault();const fd=new FormData();fd.append("doc_type",dt.value);fd.append("file",df.files[0]);try{await api("/api/customer/document",{method:"POST",body:fd});alert("Uploaded");custDocs()}catch(e){alert(e.message)}}
 async function custInvest(){
-const d=await api("/api/customer/dashboard");document.getElementById("content").innerHTML=`<div class="title"><h1>Customer Invest Plan</h1></div><div class="card"><h2>Investor Customer Details</h2><p><b>Customer Name:</b> ${esc(d.user.name)}</p><p><b>Father/Husband Name:</b> ${esc(d.user.father_husband)}</p><p><b>Reg. Mobile No.:</b> ${esc(d.user.mobile)}</p><p><b>Address:</b> ${esc(d.user.address)}</p></div><div class="table-wrap" style="margin-top:14px"><table class="table"><tr><th>Investment ID</th><th>जमा राशि</th><th>निवेश की तिथि</th><th>रिश्ते का नाम</th><th>Status</th></tr>${d.investments.map(r=>`<tr><td>${r.investment_id}</td><td>${money(r.amount)}</td><td>${r.investment_date}</td><td>${esc(r.relation_name)}</td><td>${r.status}</td></tr>`).join("")||"<tr><td colspan=5>No investment found</td></tr>"}</table></div>`}
+const d=await api("/api/customer/dashboard");document.getElementById("content").innerHTML=`<div class="title"><h1>Customer Invest Plan</h1></div><div class="card"><h2>Investor Customer Details</h2><p><b>Customer Name:</b> ${esc(d.user.name)}</p><p><b>Father/Husband Name:</b> ${esc(d.user.father_husband)}</p><p><b>Reg. Mobile No.:</b> ${esc(d.user.mobile)}</p><p><b>Address:</b> ${esc(d.user.address)}</p></div><div class="table-wrap" style="margin-top:14px"><table class="table"><tr><th>Investment ID</th><th>Initial Investment</th><th>Deposit</th><th>निकासी</th><th>Current Balance</th><th>निवेश की तिथि</th><th>रिश्ते का नाम</th><th>Status</th></tr>${d.investments.map(r=>`<tr><td>${r.investment_id}</td><td>${money(r.amount)}</td><td>${money(r.deposit_total)}</td><td>${money(r.withdrawal_total)}</td><td><b>${money(r.balance)}</b></td><td>${r.investment_date}</td><td>${esc(r.relation_name)}</td><td>${r.status}</td></tr>`).join("")||"<tr><td colspan=8>No investment found</td></tr>"}</table></div>`}
 function custClosure(){document.getElementById("content").innerHTML=`<div class="card"><h1>Loan Closure</h1><form onsubmit="sendClosure(event)" class="form"><div class="field"><label>Loan ID</label><input id="clid" required></div><div class="field"><label>Reason</label><input id="clr"></div><div class="field full"><button class="btn">Request Closure</button></div></form></div>`}
 async function sendClosure(e){e.preventDefault();try{await api("/api/customer/closure",{method:"POST",body:{loan_id:clid.value,reason:clr.value}});alert("Closure request submitted")}catch(e){alert(e.message)}}
 async function custSettings(){const d=await api("/api/me");document.getElementById("content").innerHTML=`<div class="card"><h1>Setting</h1><form onsubmit="saveProfile(event)" class="form"><div class="field"><label>Name</label><input id="pn" value="${esc(d.user.name)}"></div><div class="field"><label>Father/Husband</label><input id="pf" value="${esc(d.user.father_husband)}"></div><div class="field"><label>Email</label><input id="pe" value="${esc(d.user.email)}"></div><div class="field"><label>Language</label><select id="pl"><option>Hindi</option><option>English</option><option>Bhojpuri</option><option>Bengali</option><option>Marathi</option></select></div><div class="field full"><label>Address</label><textarea id="pa">${esc(d.user.address)}</textarea></div><div class="field full"><button class="btn">Save Settings</button></div></form></div>`}

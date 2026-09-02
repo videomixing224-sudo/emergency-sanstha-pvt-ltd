@@ -150,6 +150,19 @@ CREATE TABLE IF NOT EXISTS investments(
  FOREIGN KEY(customer_id) REFERENCES users(id)
 );
 
+CREATE TABLE IF NOT EXISTS investment_transactions(
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ investment_id INTEGER NOT NULL,
+ customer_id INTEGER NOT NULL,
+ type TEXT NOT NULL CHECK(type IN ('deposit','withdrawal')),
+ amount REAL NOT NULL,
+ transaction_date TEXT NOT NULL,
+ note TEXT,
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+ FOREIGN KEY(investment_id) REFERENCES investments(id),
+ FOREIGN KEY(customer_id) REFERENCES users(id)
+);
+
 CREATE TABLE IF NOT EXISTS documents(
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  customer_id INTEGER NOT NULL,
@@ -1023,10 +1036,22 @@ app.get(
     `).all(req.user.id);
 
     const investments = db.prepare(`
-      SELECT *
-      FROM investments
-      WHERE customer_id=?
-      ORDER BY id DESC
+      SELECT
+        i.*,
+        COALESCE((SELECT SUM(t.amount) FROM investment_transactions t
+                  WHERE t.investment_id=i.id AND t.type='deposit'),0) AS deposit_total,
+        COALESCE((SELECT SUM(t.amount) FROM investment_transactions t
+                  WHERE t.investment_id=i.id AND t.type='withdrawal'),0) AS withdrawal_total,
+        (
+          i.amount
+          + COALESCE((SELECT SUM(t.amount) FROM investment_transactions t
+                      WHERE t.investment_id=i.id AND t.type='deposit'),0)
+          - COALESCE((SELECT SUM(t.amount) FROM investment_transactions t
+                      WHERE t.investment_id=i.id AND t.type='withdrawal'),0)
+        ) AS balance
+      FROM investments i
+      WHERE i.customer_id=?
+      ORDER BY i.id DESC
     `).all(req.user.id);
 
     const requests = db.prepare(`
@@ -1497,9 +1522,15 @@ app.get(
 
     const investments =
       db.prepare(`
-        SELECT
-          COALESCE(SUM(amount),0) s
-        FROM investments
+        SELECT COALESCE(SUM(
+          i.amount
+          + COALESCE((SELECT SUM(t.amount) FROM investment_transactions t
+                     WHERE t.investment_id=i.id AND t.type='deposit'),0)
+          - COALESCE((SELECT SUM(t.amount) FROM investment_transactions t
+                     WHERE t.investment_id=i.id AND t.type='withdrawal'),0)
+        ),0) s
+        FROM investments i
+        WHERE i.status='active'
       `).get().s;
 
     const outstanding =
@@ -2144,24 +2175,33 @@ app.get(
   auth,
   roles("admin"),
   (req, res) => {
-
     return res.json(
       db.prepare(`
         SELECT
-          investments.*,
-          users.name customer_name,
-          users.mobile
-        FROM investments
-        JOIN users
-          ON users.id=investments.customer_id
-        ORDER BY investments.id DESC
+          i.*,
+          u.name AS customer_name,
+          u.mobile,
+          COALESCE((SELECT SUM(t.amount) FROM investment_transactions t
+                    WHERE t.investment_id=i.id AND t.type='deposit'),0) AS deposit_total,
+          COALESCE((SELECT SUM(t.amount) FROM investment_transactions t
+                    WHERE t.investment_id=i.id AND t.type='withdrawal'),0) AS withdrawal_total,
+          (
+            i.amount
+            + COALESCE((SELECT SUM(t.amount) FROM investment_transactions t
+                        WHERE t.investment_id=i.id AND t.type='deposit'),0)
+            - COALESCE((SELECT SUM(t.amount) FROM investment_transactions t
+                        WHERE t.investment_id=i.id AND t.type='withdrawal'),0)
+          ) AS balance
+        FROM investments i
+        JOIN users u ON u.id=i.customer_id
+        ORDER BY i.id DESC
       `).all()
     );
   }
 );
 
 /* -----------------------------
-   Add Investment
+   Add New Investment
 ----------------------------- */
 
 app.post(
@@ -2169,7 +2209,6 @@ app.post(
   auth,
   roles("admin"),
   (req, res) => {
-
     const {
       customer_id,
       amount,
@@ -2178,43 +2217,152 @@ app.post(
       status = "active"
     } = req.body;
 
-    if (
-      !customer_id ||
-      !amount ||
-      !investment_date
-    ) {
-
+    if (!customer_id || !amount || !investment_date) {
       return res.status(400).json({
-        error:
-          "Customer, amount and date are required"
+        error: "Investor, amount and date are required"
       });
     }
 
-    const investment_id =
-      idCode("INV");
+    const customer = db.prepare(`
+      SELECT id FROM users
+      WHERE id=? AND role='investor'
+      LIMIT 1
+    `).get(customer_id);
+
+    if (!customer) {
+      return res.status(400).json({ error: "Select a valid investor customer" });
+    }
+
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      return res.status(400).json({ error: "Enter a valid investment amount" });
+    }
+
+    const investment_id = idCode("INV");
 
     db.prepare(`
       INSERT INTO investments
-      (
-        customer_id,
-        investment_id,
-        amount,
-        investment_date,
-        relation_name,
-        status
-      )
+      (customer_id, investment_id, amount, investment_date, relation_name, status)
       VALUES (?, ?, ?, ?, ?, ?)
     `).run(
       customer_id,
       investment_id,
-      Number(amount),
+      numericAmount,
       investment_date,
-      relation_name || "",
+      String(relation_name || "").trim(),
       status
     );
 
     return res.json({
-      investment_id
+      investment_id,
+      message: "New investment added successfully"
+    });
+  }
+);
+
+/* -----------------------------
+   Investment Transactions
+----------------------------- */
+
+app.get(
+  "/api/admin/investment-transactions",
+  auth,
+  roles("admin"),
+  (req, res) => {
+    return res.json(
+      db.prepare(`
+        SELECT
+          t.*,
+          i.investment_id AS investment_code,
+          u.name AS customer_name,
+          u.mobile
+        FROM investment_transactions t
+        JOIN investments i ON i.id=t.investment_id
+        JOIN users u ON u.id=t.customer_id
+        ORDER BY t.id DESC
+      `).all()
+    );
+  }
+);
+
+app.post(
+  "/api/admin/investment-transactions",
+  auth,
+  roles("admin"),
+  (req, res) => {
+    const {
+      investment_id,
+      type,
+      amount,
+      transaction_date,
+      note
+    } = req.body;
+
+    if (!investment_id || !["deposit", "withdrawal"].includes(type) || !amount || !transaction_date) {
+      return res.status(400).json({
+        error: "Investment, transaction type, amount and date are required"
+      });
+    }
+
+    const investment = db.prepare(`
+      SELECT
+        i.id,
+        i.customer_id,
+        i.investment_id,
+        i.status,
+        (
+          i.amount
+          + COALESCE((SELECT SUM(t.amount) FROM investment_transactions t
+                      WHERE t.investment_id=i.id AND t.type='deposit'),0)
+          - COALESCE((SELECT SUM(t.amount) FROM investment_transactions t
+                      WHERE t.investment_id=i.id AND t.type='withdrawal'),0)
+        ) AS balance
+      FROM investments i
+      WHERE i.id=?
+      LIMIT 1
+    `).get(investment_id);
+
+    if (!investment) {
+      return res.status(404).json({ error: "Investment not found" });
+    }
+
+    if (investment.status !== "active") {
+      return res.status(400).json({ error: "Only active investments can receive transactions" });
+    }
+
+    const numericAmount = Number(amount);
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      return res.status(400).json({ error: "Enter a valid amount" });
+    }
+
+    if (type === "withdrawal" && numericAmount > Number(investment.balance)) {
+      return res.status(400).json({
+        error: `Withdrawal cannot exceed current balance ${investment.balance}`
+      });
+    }
+
+    db.prepare(`
+      INSERT INTO investment_transactions
+      (investment_id, customer_id, type, amount, transaction_date, note)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(
+      investment.id,
+      investment.customer_id,
+      type,
+      numericAmount,
+      transaction_date,
+      String(note || "").trim()
+    );
+
+    const newBalance =
+      Number(investment.balance) +
+      (type === "deposit" ? numericAmount : -numericAmount);
+
+    return res.json({
+      message: type === "deposit"
+        ? "Investment deposit saved successfully"
+        : "Investment withdrawal saved successfully",
+      balance: newBalance
     });
   }
 );
