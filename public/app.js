@@ -64,7 +64,7 @@ function nav(label,fn,active=""){return `<button class="${active}" onclick="${fn
 
 async function renderAdmin(){
 shell("Admin Dashboard",[
-nav("📊 Dashboard","adminDash()","active"),nav("👥 Customers","adminCustomers()"),nav("💰 Loan Management","adminLoans()"),nav("💵 Payment Collection","adminPayments()"),nav("📈 Investment Management","adminInvestments()"),nav("📞 Service Requests","adminRequests()"),nav("🏦 Account Mandates","adminMandates()"),nav("🔒 Loan Closure","adminClosures()"),nav("📄 Documents","adminDocs()")
+nav("📊 Dashboard","adminDash()","active"),nav("👥 Customers","adminCustomers()"),nav("💰 Loan Management","adminLoans()"),nav("💵 Payment Collection","adminPayments()"),nav("📋 Loan Payments & History","adminLoanPayments()"),nav("📈 Investment Management","adminInvestments()"),nav("📞 Service Requests","adminRequests()"),nav("🏦 Account Mandates","adminMandates()"),nav("🔒 Loan Closure","adminClosures()"),nav("📄 Documents","adminDocs()")
 ].join(""),`<p class="muted">Loading...</p>`);adminDash();
 }
 async function adminDash(){
@@ -246,6 +246,31 @@ async function adminPayments(){
   ${rows.map(r=>`<tr><td><b>${esc(r.loan_code)}</b></td><td>${esc(r.customer_name)}<br><small>${esc(r.mobile||"")}</small></td><td>${money(r.amount)}</td><td>${esc(r.payment_date)}</td><td>${esc(r.note||"")}</td></tr>`).join("")||"<tr><td colspan=5>No payments found</td></tr>"}
   </table></div>`;
 }
+async function adminLoanPayments(){
+  try{
+    const [loans,txns]=await Promise.all([api("/api/admin/loans"),api("/api/admin/loan-transactions")]);
+    const byLoan={};
+    txns.forEach(t=>(byLoan[t.loan_id]??=[]).push(t));
+    document.getElementById("content").innerHTML=`<div class="title"><h1>Loan Payments & History</h1><div class="row"><button class="btn" onclick="openQuickPaymentForm()">+ Collect Payment</button><button class="btn secondary" onclick="adminLoans()">Loan Management</button></div></div>
+    <div class="card" style="margin-bottom:16px"><b>Admin Loan View:</b> यहाँ सभी customers के loan, payment, interest, penalty और Loan + / Loan − transactions date के साथ दिखाई देंगे।</div>
+    <div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Customer</th><th>Loan Amount</th><th>Total Jama</th><th>Outstanding</th><th>Interest</th><th>EMI</th><th>Status</th><th>Action</th></tr>
+    ${loans.map(r=>{
+      const list=byLoan[r.id]||[];
+      const paid=list.filter(t=>t.type==="payment").reduce((a,t)=>a+Number(t.amount||0),0);
+      return `<tr><td><b>${esc(r.loan_id)}</b></td><td>${esc(r.customer_name)}<br><small>${esc(r.mobile||"")}</small></td><td>${money(r.principal)}</td><td>${money(paid)}</td><td><b>${money(r.outstanding)}</b></td><td>${money(r.total_interest)}</td><td>${money(r.emi)}</td><td>${esc(r.status)}</td><td><button class="btn" onclick="openPaymentForm(${r.id})">+ Payment</button> <button class="btn secondary" onclick="openAdminLoanHistory(${r.id})">History</button></td></tr>`
+    }).join("")||"<tr><td colspan=9>No loan found</td></tr>"}</table></div>`;
+  }catch(e){alert(e.message)}
+}
+async function openAdminLoanHistory(id){
+  try{
+    const [loans,tx]=await Promise.all([api("/api/admin/loans"),api(`/api/admin/loans/${id}/transactions`)]);
+    const loan=loans.find(x=>Number(x.id)===Number(id));
+    showModal(`<h2>Loan Payment & Transaction History</h2><div class="notice"><b>Loan ID:</b> ${esc(loan?.loan_id||"")}<br><b>Customer:</b> ${esc(loan?.customer_name||"")}<br><b>Loan Amount:</b> ${money(loan?.principal)}<br><b>Remaining:</b> <b>${money(loan?.outstanding)}</b></div>
+    <div class="row" style="margin:12px 0"><button class="btn" onclick="openPaymentForm(${id})">+ Collect Payment</button><button class="btn secondary" onclick="openLoanAdjustmentForm('interest',${id})">+ Interest</button><button class="btn danger" onclick="openLoanAdjustmentForm('penalty',${id})">+ Penalty</button><button class="btn secondary" onclick="openLoanAdjustmentForm('add',${id})">Loan +</button><button class="btn secondary" onclick="openLoanAdjustmentForm('subtract',${id})">Loan −</button></div>
+    <div class="table-wrap"><table class="table"><tr><th>Type</th><th>Amount</th><th>Date</th><th>Note</th></tr>${tx.map(t=>`<tr><td><span class="badge">${t.type==="payment"?"Payment":t.type==="interest"?"Interest":t.type==="penalty"?"Penalty":t.type==="add"?"Loan +":"Loan −"}</span></td><td>${money(t.amount)}</td><td>${esc(t.transaction_date)}</td><td>${esc(t.note||"")}</td></tr>`).join("")||"<tr><td colspan=4>No transactions found</td></tr>"}</table></div><div class="row" style="margin-top:12px"><button class="btn secondary" onclick="closeModal()">Close</button></div>`);
+  }catch(e){alert(e.message)}
+}
+
 async function adminInvestments(){
 const [rows,txns]=await Promise.all([
   api("/api/admin/investments"),
