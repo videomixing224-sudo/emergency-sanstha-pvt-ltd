@@ -138,6 +138,19 @@ CREATE TABLE IF NOT EXISTS loan_payments(
  FOREIGN KEY(customer_id) REFERENCES users(id)
 );
 
+CREATE TABLE IF NOT EXISTS loan_adjustments(
+ id INTEGER PRIMARY KEY AUTOINCREMENT,
+ loan_id INTEGER NOT NULL,
+ customer_id INTEGER NOT NULL,
+ type TEXT NOT NULL CHECK(type IN ('interest','penalty','add','subtract')),
+ amount REAL NOT NULL,
+ transaction_date TEXT NOT NULL,
+ note TEXT,
+ created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+ FOREIGN KEY(loan_id) REFERENCES loans(id),
+ FOREIGN KEY(customer_id) REFERENCES users(id)
+);
+
 CREATE TABLE IF NOT EXISTS investments(
  id INTEGER PRIMARY KEY AUTOINCREMENT,
  customer_id INTEGER NOT NULL,
@@ -1066,15 +1079,29 @@ app.get(
       FROM loan_payments
       JOIN loans ON loans.id=loan_payments.loan_id
       WHERE loan_payments.customer_id=?
-      ORDER BY loan_payments.id DESC
+      ORDER BY loan_payments.payment_date DESC, loan_payments.id DESC
     `).all(req.user.id);
+
+    const loanTransactions = db.prepare(`
+      SELECT loan_payments.loan_id, loans.loan_id AS loan_code, 'payment' AS type,
+             loan_payments.amount, loan_payments.payment_date AS transaction_date, loan_payments.note
+      FROM loan_payments JOIN loans ON loans.id=loan_payments.loan_id
+      WHERE loan_payments.customer_id=?
+      UNION ALL
+      SELECT loan_adjustments.loan_id, loans.loan_id AS loan_code, loan_adjustments.type,
+             loan_adjustments.amount, loan_adjustments.transaction_date, loan_adjustments.note
+      FROM loan_adjustments JOIN loans ON loans.id=loan_adjustments.loan_id
+      WHERE loan_adjustments.customer_id=?
+      ORDER BY transaction_date DESC
+    `).all(req.user.id, req.user.id);
 
     return res.json({
       user,
       loans,
       investments,
       requests,
-      payments
+      payments,
+      loanTransactions
     });
   }
 );
@@ -1826,7 +1853,11 @@ app.get(
           loans.*,
           users.name customer_name,
           users.mobile,
-          COALESCE((SELECT SUM(amount) FROM loan_payments WHERE loan_payments.loan_id=loans.id), 0) AS total_paid
+          COALESCE((SELECT SUM(amount) FROM loan_payments WHERE loan_payments.loan_id=loans.id), 0) AS total_paid,
+          COALESCE((SELECT SUM(amount) FROM loan_adjustments WHERE loan_adjustments.loan_id=loans.id AND loan_adjustments.type='interest'), 0) AS total_interest,
+          COALESCE((SELECT SUM(amount) FROM loan_adjustments WHERE loan_adjustments.loan_id=loans.id AND loan_adjustments.type='penalty'), 0) AS total_penalty,
+          COALESCE((SELECT SUM(amount) FROM loan_adjustments WHERE loan_adjustments.loan_id=loans.id AND loan_adjustments.type IN ('add','interest','penalty')), 0) AS total_added,
+          COALESCE((SELECT SUM(amount) FROM loan_adjustments WHERE loan_adjustments.loan_id=loans.id AND loan_adjustments.type='subtract'), 0) AS total_subtracted
         FROM loans
         JOIN users
           ON users.id=loans.customer_id
@@ -2100,7 +2131,7 @@ app.get("/api/admin/payments", auth, roles("admin"), (req, res) => {
     FROM loan_payments
     JOIN loans ON loans.id=loan_payments.loan_id
     JOIN users ON users.id=loan_payments.customer_id
-    ORDER BY loan_payments.id DESC
+    ORDER BY loan_payments.payment_date DESC, loan_payments.id DESC
   `).all());
 });
 
@@ -2164,6 +2195,70 @@ app.get("/api/admin/loans/:id/payments", auth, roles("admin"), (req, res) => {
     WHERE loan_id=?
     ORDER BY id DESC
   `).all(loan.id));
+});
+
+/* -----------------------------
+   Loan Interest / Penalty / +/- Adjustments
+----------------------------- */
+app.get("/api/admin/loans/:id/transactions", auth, roles("admin"), (req, res) => {
+  const loan = db.prepare("SELECT id FROM loans WHERE id=? LIMIT 1").get(req.params.id);
+  if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+  const rows = db.prepare(`
+    SELECT id, 'payment' AS type, amount, payment_date AS transaction_date, note, created_at
+    FROM loan_payments WHERE loan_id=?
+    UNION ALL
+    SELECT id, type, amount, transaction_date, note, created_at
+    FROM loan_adjustments WHERE loan_id=?
+    ORDER BY transaction_date DESC, id DESC
+  `).all(loan.id, loan.id);
+  return res.json(rows);
+});
+
+app.post("/api/admin/loans/:id/adjustments", auth, roles("admin"), (req, res) => {
+  const loan = db.prepare(`
+    SELECT id, loan_id, customer_id, outstanding, status
+    FROM loans WHERE id=? LIMIT 1
+  `).get(req.params.id);
+  if (!loan) return res.status(404).json({ error: "Loan not found" });
+
+  const type = String(req.body.type || "");
+  if (!["interest","penalty","add","subtract"].includes(type)) {
+    return res.status(400).json({ error: "Invalid adjustment type" });
+  }
+  const amount = Number(req.body.amount);
+  if (!Number.isFinite(amount) || amount <= 0) {
+    return res.status(400).json({ error: "Enter a valid amount" });
+  }
+  const transactionDate = String(req.body.transaction_date || new Date().toISOString().slice(0,10));
+  const note = String(req.body.note || "").trim();
+  const current = Math.max(0, Number(loan.outstanding || 0));
+  if (type === "subtract" && amount > current) {
+    return res.status(400).json({ error: `Amount cannot exceed current outstanding ${current}` });
+  }
+
+  const delta = ["interest","penalty","add"].includes(type) ? amount : -amount;
+  const next = Math.max(0, current + delta);
+  const status = next <= 0 ? "cleared" : (loan.status === "cleared" ? "active" : loan.status);
+
+  const tx = db.transaction(() => {
+    db.prepare(`
+      INSERT INTO loan_adjustments
+      (loan_id, customer_id, type, amount, transaction_date, note)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(loan.id, loan.customer_id, type, amount, transactionDate, note);
+    db.prepare("UPDATE loans SET outstanding=?, status=? WHERE id=?").run(next, status, loan.id);
+  });
+  tx();
+
+  return res.json({
+    message: type === "interest" ? "Interest added successfully"
+      : type === "penalty" ? "Penalty added successfully"
+      : type === "add" ? "Loan amount increased successfully"
+      : "Loan amount reduced successfully",
+    loan_id: loan.loan_id,
+    outstanding: next
+  });
 });
 
 /* -----------------------------

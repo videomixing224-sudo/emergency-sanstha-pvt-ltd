@@ -95,8 +95,30 @@ const x=r||{};showModal(`<h2>${r?"Edit":"Add"} Customer</h2><form onsubmit="save
 async function saveCustomer(e,id){e.preventDefault();try{const body={name:cn.value,father_husband:cf.value,mobile:cm.value,email:ce.value,role:cr.value,language:cl.value,address:ca.value,password:cpw.value};const result=await api(id?`/api/admin/customers/${id}`:"/api/admin/customers",{method:id?"PUT":"POST",body});closeModal();adminCustomers();if(!id)alert(result.message+(result.temporary_password?`\\n\\nUser ID: ${result.customer_user_id}\\nPassword: ${result.temporary_password}`:""))}catch(e){alert(e.message)}}
 
 async function adminLoans(){
-const rows=await api("/api/admin/loans");document.getElementById("content").innerHTML=`<div class="title"><h1>Loan Management</h1><div class="row"><button class="btn" onclick="openLoanForm()">+ New Loan</button><button class="btn secondary" onclick="location.href='/api/admin/export/loans'">Export CSV</button></div></div>
-<div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Customer</th><th>Product</th><th>Principal</th><th>Outstanding</th><th>Paid</th><th>Interest</th><th>EMI</th><th>Duration</th><th>Payment</th><th>DPD</th><th>Status</th><th>Action</th></tr>${rows.map(r=>`<tr><td>${r.loan_id}</td><td>${esc(r.customer_name)}<br><small>${r.mobile}</small></td><td>${esc(r.product)}</td><td>${money(r.principal)}</td><td>${money(r.outstanding)}</td><td>${money(r.total_paid)}</td><td>${r.interest_rate}%</td><td>${money(r.emi)}</td><td>${r.duration_days||0} days</td><td>${r.payment_frequency||"monthly"}</td><td>${r.dpd}</td><td>${r.status}</td><td><button class="btn" onclick="openPaymentForm(${r.id})">Add Payment</button> <button class="btn secondary" onclick="openAgreement(${r.id})">Agreement</button> <button class="btn secondary" onclick="markLoanClear(${r.id})">Clear</button> <button class="btn secondary" onclick="deleteLoan(${r.id},${JSON.stringify(r.status)})">Delete</button></td></tr>`).join("")}</table></div>`;
+const rows=await api("/api/admin/loans");
+document.getElementById("content").innerHTML=`<div class="title"><h1>Loan Management</h1><div class="row">
+<button class="btn" onclick="openLoanForm()">+ New Loan</button>
+<button class="btn" onclick="openLoanAdjustmentForm('interest')">+ Interest</button>
+<button class="btn danger" onclick="openLoanAdjustmentForm('penalty')">+ Penalty</button>
+<button class="btn secondary" onclick="openLoanAdjustmentForm('add')">Loan +</button>
+<button class="btn secondary" onclick="openLoanAdjustmentForm('subtract')">Loan −</button>
+<button class="btn secondary" onclick="location.href='/api/admin/export/loans'">Export CSV</button>
+</div></div>
+<div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Customer</th><th>Principal</th><th>Interest</th><th>Penalty</th><th>Added</th><th>Paid</th><th>Reduced</th><th>Remaining</th><th>EMI</th><th>Date</th><th>Status</th><th>Action</th></tr>
+${rows.map(r=>`<tr><td><b>${esc(r.loan_id)}</b></td><td>${esc(r.customer_name)}<br><small>${esc(r.mobile||"")}</small></td>
+<td>${money(r.principal)}</td><td>${money(r.total_interest)}</td><td>${money(r.total_penalty)}</td><td>${money(r.total_added)}</td>
+<td>${money(r.total_paid)}</td><td>${money(r.total_subtracted)}</td><td><b>${money(r.outstanding)}</b></td><td>${money(r.emi)}</td>
+<td>${esc(r.start_date||"")}</td><td>${esc(r.status)}</td><td>
+<button class="btn" onclick="openPaymentForm(${r.id})">+ Payment</button>
+<button class="btn secondary" onclick="openLoanAdjustmentForm('interest',${r.id})">Interest</button>
+<button class="btn danger" onclick="openLoanAdjustmentForm('penalty',${r.id})">Penalty</button>
+<button class="btn secondary" onclick="openLoanAdjustmentForm('add',${r.id})">+</button>
+<button class="btn secondary" onclick="openLoanAdjustmentForm('subtract',${r.id})">−</button>
+<button class="btn secondary" onclick="openLoanTransactions(${r.id})">History</button>
+<button class="btn secondary" onclick="openAgreement(${r.id})">Agreement</button>
+<button class="btn secondary" onclick="markLoanClear(${r.id})">Clear</button>
+<button class="btn secondary" onclick="deleteLoan(${r.id},${JSON.stringify(r.status)})">Delete</button>
+</td></tr>`).join("")||"<tr><td colspan=13>No loans found</td></tr>"}</table></div>`;
 }
 async function markLoanClear(id){try{await api(`/api/admin/loans/${id}/clear`,{method:"POST"});adminLoans()}catch(e){alert(e.message)}}
 async function deleteLoan(id,status){if(!["cleared","closed"].includes(String(status).toLowerCase())){alert("Pehle loan ko Clear karein. Sirf cleared/closed loan delete ho sakta hai.");return}if(!confirm("Kya aap is cleared loan ko permanently delete karna chahte hain?"))return;try{await api(`/api/admin/loans/${id}`,{method:"DELETE"});adminLoans()}catch(e){alert(e.message)}}
@@ -125,6 +147,41 @@ const customers=await api("/api/admin/customers");showModal(`<h2>Create Loan</h2
 <div class="field full"><button class="btn">Create Loan</button></div></form>`);
 }
 async function saveLoan(e){e.preventDefault();try{const result=await api("/api/admin/loans",{method:"POST",body:{customer_id:lc.value,product:lp.value,principal:lpr.value,outstanding:lo.value,interest_rate:li.value,emi:le.value,dpd:ld.value,start_date:ls.value,duration_days:ldays.value,payment_frequency:lf.value,password:lpw.value}});closeModal();adminLoans();alert(result.message+(result.temporary_password?`\\n\\nUser ID: ${result.customer_user_id}\\nPassword: ${result.temporary_password}`:""))}catch(e){alert(e.message)}}
+
+async function openLoanAdjustmentForm(type, loanId){
+const loans=await api("/api/admin/loans");
+const selected=loanId ? loans.find(x=>Number(x.id)===Number(loanId)) : loans[0];
+if(!selected){alert("Loan not found");return}
+const title={interest:"Add Interest",penalty:"Add Penalty",add:"Loan Amount +",subtract:"Loan Amount −"}[type];
+showModal(`<h2>${title}</h2>
+<div class="notice"><b>Loan:</b> ${esc(selected.loan_id)}<br><b>Customer:</b> ${esc(selected.customer_name)}<br><b>Current Remaining:</b> ${money(selected.outstanding)}</div>
+<form onsubmit="saveLoanAdjustment(event,'${type}')" class="form">
+<div class="field full"><label>Loan</label><select id="adjLoan" required>
+${loans.map(r=>`<option value="${r.id}" ${Number(r.id)===Number(selected.id)?"selected":""}>${esc(r.loan_id)} — ${esc(r.customer_name)} — Remaining ${money(r.outstanding)}</option>`).join("")}
+</select></div>
+<div class="field"><label>Amount</label><input id="adjAmount" type="number" min="0.01" step="0.01" max="${type==="subtract"?Number(selected.outstanding)||0:""}" required></div>
+<div class="field"><label>Date</label><input id="adjDate" type="date" value="${new Date().toISOString().slice(0,10)}" required></div>
+<div class="field full"><label>Note</label><textarea id="adjNote" rows="3" placeholder="Reason / details"></textarea></div>
+<div class="field full"><button class="btn ${type==="penalty"||type==="subtract"?"danger":""}">Save ${title}</button></div>
+</form>`);
+}
+async function saveLoanAdjustment(e,type){
+e.preventDefault();
+try{
+const result=await api(`/api/admin/loans/${adjLoan.value}/adjustments`,{method:"POST",body:{type,amount:adjAmount.value,transaction_date:adjDate.value,note:adjNote.value}});
+closeModal();adminLoans();alert(`${result.message}\nLoan ID: ${result.loan_id}\nRemaining: ${money(result.outstanding)}`);
+}catch(e){alert(e.message)}
+}
+async function openLoanTransactions(id){
+try{
+const [loans,tx]=await Promise.all([api("/api/admin/loans"),api(`/api/admin/loans/${id}/transactions`)]);
+const loan=loans.find(x=>Number(x.id)===Number(id));
+showModal(`<h2>Loan Transaction History</h2><div class="notice"><b>${esc(loan?.loan_id||"")}</b> — ${esc(loan?.customer_name||"")}<br>Remaining: <b>${money(loan?.outstanding)}</b></div>
+<div class="table-wrap"><table class="table"><tr><th>Type</th><th>Amount</th><th>Date</th><th>Note</th></tr>
+${tx.map(t=>`<tr><td><span class="badge">${t.type==="payment"?"Payment":t.type==="interest"?"Interest":t.type==="penalty"?"Penalty":t.type==="add"?"Loan +":"Loan −"}</span></td><td>${money(t.amount)}</td><td>${esc(t.transaction_date)}</td><td>${esc(t.note||"")}</td></tr>`).join("")||"<tr><td colspan=4>No transactions found</td></tr>"}</table></div>
+<div class="row" style="margin-top:12px"><button class="btn secondary" onclick="closeModal()">Close</button></div>`);
+}catch(e){alert(e.message)}
+}
 
 async function openPaymentForm(loanId){
   const loans=await api("/api/admin/loans");
@@ -271,9 +328,9 @@ ${d.loans.map(r=>{
  const paid=payments.filter(p=>Number(p.loan_id)===Number(r.id)).reduce((sum,p)=>sum+Number(p.amount||0),0);
  return `<tr><td>${esc(r.loan_id)}</td><td>${esc(r.product)}</td><td>${money(r.principal)}</td><td>${money(paid)}</td><td>${money(r.outstanding)}</td><td>${r.interest_rate}%</td><td>${money(r.emi)}</td><td>${r.duration_days||0} days</td><td>${r.payment_frequency||"monthly"}</td><td>${r.status}</td><td><button class="btn secondary" onclick="openCustomerAgreement(${r.id},${JSON.stringify(r.loan_id)})">Agreement</button></td></tr>`;
 }).join("")||"<tr><td colspan=10>No loan found</td></tr>"}</table></div>
-<div class="card" style="margin-top:16px"><h2>Payment History</h2>
-<div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Jama Amount</th><th>Date</th><th>Note</th></tr>
-${payments.map(p=>`<tr><td><b>${esc(p.loan_code)}</b></td><td>${money(p.amount)}</td><td>${esc(p.payment_date)}</td><td>${esc(p.note||"")}</td></tr>`).join("")||"<tr><td colspan=4>No payment recorded</td></tr>"}
+<div class="card" style="margin-top:16px"><h2>All Loan Transactions</h2>
+<div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Type</th><th>Amount</th><th>Date</th><th>Note</th></tr>
+${(d.loanTransactions||[]).map(t=>`<tr><td><b>${esc(t.loan_code)}</b></td><td><span class="badge">${t.type==="payment"?"Payment":t.type==="interest"?"Interest":t.type==="penalty"?"Penalty":t.type==="add"?"Loan +":"Loan −"}</span></td><td>${money(t.amount)}</td><td>${esc(t.transaction_date)}</td><td>${esc(t.note||"")}</td></tr>`).join("")||"<tr><td colspan=5>No loan transaction recorded</td></tr>"}
 </table></div></div>`;
 }
 async function openCustomerAgreement(id,loanCode){
