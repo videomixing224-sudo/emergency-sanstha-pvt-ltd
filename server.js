@@ -1814,12 +1814,21 @@ app.delete("/api/admin/customers/:id", auth, roles("admin"), (req, res) => {
       db.prepare("DELETE FROM service_requests WHERE customer_id=?").run(userId);
       db.prepare("DELETE FROM mandates WHERE customer_id=?").run(userId);
       db.prepare("DELETE FROM documents WHERE customer_id=?").run(userId);
+      db.prepare("DELETE FROM investment_transactions WHERE customer_id=?").run(userId);
+      // Delete investment transactions by investment_id as well, including older
+      // records whose customer_id may not match the parent investment.
+      const investments = db.prepare("SELECT id FROM investments WHERE customer_id=?").all(userId);
+      for (const investment of investments) {
+        db.prepare("DELETE FROM investment_transactions WHERE investment_id=?").run(investment.id);
+      }
       db.prepare("DELETE FROM investments WHERE customer_id=?").run(userId);
       db.prepare("DELETE FROM loan_payments WHERE customer_id=?").run(userId);
+      db.prepare("DELETE FROM loan_adjustments WHERE customer_id=?").run(userId);
 
-      // Also remove payments by loan_id in case older records have a mismatched customer_id.
+      // Also remove loan child records by loan_id in case older records have a mismatched customer_id.
       for (const loan of loans) {
         db.prepare("DELETE FROM loan_payments WHERE loan_id=?").run(loan.id);
+        db.prepare("DELETE FROM loan_adjustments WHERE loan_id=?").run(loan.id);
       }
 
       db.prepare("DELETE FROM loans WHERE customer_id=?").run(userId);
@@ -2114,9 +2123,22 @@ app.delete("/api/admin/loans/:id", auth, roles("admin"), (req, res) => {
     });
   }
 
-  db.prepare("DELETE FROM closure_requests WHERE loan_id=?").run(loan.loan_id);
-  db.prepare("DELETE FROM loan_payments WHERE loan_id=?").run(loan.id);
-  db.prepare("DELETE FROM loans WHERE id=?").run(req.params.id);
+  try {
+    const tx = db.transaction(() => {
+      // loan_adjustments and loan_payments reference loans.id, so they must
+      // be removed before deleting the parent loan.
+      db.prepare("DELETE FROM closure_requests WHERE loan_id=?").run(loan.loan_id);
+      db.prepare("DELETE FROM loan_payments WHERE loan_id=?").run(loan.id);
+      db.prepare("DELETE FROM loan_adjustments WHERE loan_id=?").run(loan.id);
+      db.prepare("DELETE FROM loans WHERE id=?").run(req.params.id);
+    });
+    tx();
+  } catch (error) {
+    console.error("Loan delete error:", error);
+    return res.status(500).json({
+      error: "Loan delete failed: " + (error.message || "database error")
+    });
+  }
 
   return res.json({ message: "Cleared loan deleted successfully" });
 });
