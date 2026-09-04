@@ -2243,13 +2243,13 @@ app.get("/api/admin/loan-transactions", auth, roles("admin"), (req, res) => {
            'payment' AS type, lp.amount, lp.payment_date AS transaction_date, lp.note, lp.created_at
     FROM loan_payments lp
     JOIN loans l ON l.id=lp.loan_id
-    JOIN customers c ON c.id=l.customer_id
+    JOIN users c ON c.id=l.customer_id AND c.role IN ('customer','investor')
     UNION ALL
     SELECT la.loan_id AS loan_id, l.loan_id AS loan_code, c.name AS customer_name, c.mobile,
            la.type, la.amount, la.transaction_date, la.note, la.created_at
     FROM loan_adjustments la
     JOIN loans l ON l.id=la.loan_id
-    JOIN customers c ON c.id=l.customer_id
+    JOIN users c ON c.id=l.customer_id AND c.role IN ('customer','investor')
     ORDER BY transaction_date DESC, created_at DESC
   `).all();
   return res.json(rows);
