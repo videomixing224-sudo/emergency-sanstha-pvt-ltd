@@ -2238,21 +2238,58 @@ app.get("/api/admin/loans/:id/transactions", auth, roles("admin"), (req, res) =>
 });
 
 app.get("/api/admin/loan-transactions", auth, roles("admin"), (req, res) => {
-  const rows = db.prepare(`
-    SELECT lp.loan_id AS loan_id, l.loan_id AS loan_code, c.name AS customer_name, c.mobile,
-           'payment' AS type, lp.amount, lp.payment_date AS transaction_date, lp.note, lp.created_at
-    FROM loan_payments lp
-    JOIN loans l ON l.id=lp.loan_id
-    JOIN users c ON c.id=l.customer_id AND c.role IN ('customer','investor')
-    UNION ALL
-    SELECT la.loan_id AS loan_id, l.loan_id AS loan_code, c.name AS customer_name, c.mobile,
-           la.type, la.amount, la.transaction_date, la.note, la.created_at
-    FROM loan_adjustments la
-    JOIN loans l ON l.id=la.loan_id
-    JOIN users c ON c.id=l.customer_id AND c.role IN ('customer','investor')
-    ORDER BY transaction_date DESC, created_at DESC
-  `).all();
-  return res.json(rows);
+  try {
+    // Keep the two queries separate. This is more compatible with older
+    // SQLite databases and avoids UNION/ORDER BY failures on Railway.
+    const payments = db.prepare(`
+      SELECT
+        lp.id,
+        lp.loan_id AS loan_id,
+        l.loan_id AS loan_code,
+        u.name AS customer_name,
+        u.mobile,
+        'payment' AS type,
+        lp.amount,
+        lp.payment_date AS transaction_date,
+        COALESCE(lp.note, '') AS note,
+        lp.created_at
+      FROM loan_payments lp
+      JOIN loans l ON l.id = lp.loan_id
+      JOIN users u ON u.id = l.customer_id
+      WHERE u.role IN ('customer','investor')
+    `).all();
+
+    const adjustments = db.prepare(`
+      SELECT
+        la.id,
+        la.loan_id AS loan_id,
+        l.loan_id AS loan_code,
+        u.name AS customer_name,
+        u.mobile,
+        la.type,
+        la.amount,
+        la.transaction_date,
+        COALESCE(la.note, '') AS note,
+        la.created_at
+      FROM loan_adjustments la
+      JOIN loans l ON l.id = la.loan_id
+      JOIN users u ON u.id = l.customer_id
+      WHERE u.role IN ('customer','investor')
+    `).all();
+
+    const rows = payments.concat(adjustments).sort((a, b) => {
+      const d = String(b.transaction_date || '').localeCompare(String(a.transaction_date || ''));
+      if (d !== 0) return d;
+      return String(b.created_at || '').localeCompare(String(a.created_at || ''));
+    });
+
+    return res.json(rows);
+  } catch (error) {
+    console.error('Admin loan transactions error:', error);
+    return res.status(500).json({
+      error: 'Loan transaction history failed: ' + (error.message || 'database error')
+    });
+  }
 });
 
 app.post("/api/admin/loans/:id/adjustments", auth, roles("admin"), (req, res) => {
