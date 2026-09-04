@@ -70,7 +70,7 @@ nav("📊 Dashboard","adminDash()","active"),nav("👥 Customers","adminCustomer
 async function adminDash(){
 const d=await api("/api/admin/stats"); document.getElementById("content").innerHTML=`<div class="title"><h1>Dashboard</h1><span class="badge">Admin</span></div>
 <div class="grid"><div class="card">Customers<div class="stat">${d.customers}</div></div><div class="card">Loans<div class="stat">${d.loans}</div></div><div class="card">Total Investment<div class="stat">${money(d.investments)}</div></div><div class="card">Outstanding Loan<div class="stat">${money(d.outstanding)}</div></div></div>
-<div class="card" style="margin-top:18px"><h2>Quick Actions</h2><div class="row"><button class="btn" onclick="adminCustomers();setTimeout(()=>openCustomerForm(),100)">Add Customer</button><button class="btn" onclick="adminLoans();setTimeout(()=>openLoanForm(),100)">Add Loan</button><button class="btn" onclick="adminInvestments();setTimeout(()=>openInvestmentForm(),100)">Add Investment</button></div></div>`;
+<div class="card" style="margin-top:18px"><h2>Quick Actions</h2><div class="row"><button class="btn" onclick="adminCustomers();setTimeout(()=>openCustomerForm(),100)">Add Customer</button><button class="btn" onclick="adminLoans();setTimeout(()=>openLoanForm(),100)">Add Loan</button><button class="btn" onclick="adminInvestments();setTimeout(()=>openInvestmentForm(),100)">Add Investment</button><button class="btn" onclick="adminPayments();setTimeout(()=>openQuickPaymentForm(),100)">Collect Payment</button></div></div>`;
 }
 async function adminCustomers(){
 const rows=await api("/api/admin/customers");document.getElementById("content").innerHTML=`<div class="title"><h1>Customers</h1><div class="row"><button class="btn" onclick="openCustomerForm()">+ Add Customer</button><button class="btn secondary" onclick="location.href='/api/admin/export/customers'">Export CSV</button></div></div>
@@ -204,9 +204,44 @@ async function savePayment(e,loanId){
     alert(`${result.message}\nLoan ID: ${result.loan_id}\nJama: ${money(result.amount)}\nBaki: ${money(result.outstanding)}`);
   }catch(e){alert(e.message)}
 }
+async function openQuickPaymentForm(){
+  const loans=await api("/api/admin/loans");
+  const active=loans.filter(r=>Number(r.outstanding||0)>0 && !["cleared","closed"].includes(String(r.status||"").toLowerCase()));
+  if(!active.length){alert("Koi active loan payment ke liye available nahi hai.");return}
+  showModal(`<h2>💵 Collect Loan Payment</h2>
+  <form onsubmit="saveQuickPayment(event)" class="form">
+    <div class="field full"><label>Loan / Customer</label><select id="qpLoan" required onchange="updateQuickPaymentLimit()">
+      ${active.map(r=>`<option value="${r.id}" data-outstanding="${Number(r.outstanding)||0}">${esc(r.loan_id)} — ${esc(r.customer_name)} — Baki ${money(r.outstanding)}</option>`).join("")}
+    </select></div>
+    <div class="field"><label>Payment Amount</label><input id="qpAmount" type="number" min="0.01" step="0.01" required></div>
+    <div class="field"><label>Payment Date</label><input id="qpDate" type="date" value="${new Date().toISOString().slice(0,10)}" required></div>
+    <div class="field"><label>Payment Mode</label><select id="qpMode"><option>Cash</option><option>UPI</option><option>Bank Transfer</option><option>Cheque</option><option>Other</option></select></div>
+    <div class="field"><label>Reference No. (optional)</label><input id="qpRef" placeholder="UPI / cheque / transaction no."></div>
+    <div class="field full"><label>Note</label><textarea id="qpNote" rows="2" placeholder="Payment details"></textarea></div>
+    <div class="field full"><button class="btn">Save Payment</button></div>
+  </form>`);
+  updateQuickPaymentLimit();
+}
+function updateQuickPaymentLimit(){
+  const opt=document.querySelector("#qpLoan option:checked");
+  const input=document.getElementById("qpAmount");
+  if(opt&&input) input.max=opt.dataset.outstanding||"";
+}
+async function saveQuickPayment(e){
+  e.preventDefault();
+  try{
+    const loanId=qpLoan.value;
+    const note=[qpMode.value,qpRef.value.trim()?`Ref: ${qpRef.value.trim()}`:"",qpNote.value.trim()].filter(Boolean).join(" | ");
+    const result=await api(`/api/admin/loans/${loanId}/payments`,{method:"POST",body:{amount:qpAmount.value,payment_date:qpDate.value,note}});
+    closeModal();
+    adminPayments();
+    alert(`${result.message}\nLoan ID: ${result.loan_id}\nJama: ${money(result.amount)}\nBaki: ${money(result.outstanding)}`);
+  }catch(e){alert(e.message)}
+}
 async function adminPayments(){
   const rows=await api("/api/admin/payments");
-  document.getElementById("content").innerHTML=`<div class="title"><h1>Payment Collection</h1></div>
+  document.getElementById("content").innerHTML=`<div class="title"><h1>Payment Collection</h1><div class="row"><button class="btn" onclick="openQuickPaymentForm()">+ Collect Payment</button><button class="btn secondary" onclick="adminLoans()">Loan Management</button></div></div>
+  <div class="card" style="margin-bottom:16px"><b>Payment Entry:</b> Customer/Loan select करें, amount, date और payment mode भरें। Payment save होते ही loan का outstanding automatic कम होगा और transaction history में date के साथ दिखेगा।</div>
   <div class="table-wrap"><table class="table"><tr><th>Loan ID</th><th>Customer</th><th>Amount Jama</th><th>Date</th><th>Note</th></tr>
   ${rows.map(r=>`<tr><td><b>${esc(r.loan_code)}</b></td><td>${esc(r.customer_name)}<br><small>${esc(r.mobile||"")}</small></td><td>${money(r.amount)}</td><td>${esc(r.payment_date)}</td><td>${esc(r.note||"")}</td></tr>`).join("")||"<tr><td colspan=5>No payments found</td></tr>"}
   </table></div>`;
